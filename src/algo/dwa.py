@@ -21,13 +21,21 @@ class DWA:
         
         # DWA parameters
         self.max_rotation = math.pi  # Max angular velocity (rad/s)
-        self.max_accel = 1.0  * 4# Max linear acceleration (m/s²)
-        self.max_angular_accel = math.pi * 2 # Max angular acceleration (rad/s²)
+        self.max_accel = 1.0 * 4  # Max linear acceleration (m/s²)
+        self.max_angular_accel = math.pi * 2  # Max angular acceleration (rad/s²)
         self.dt = 0.1  # Time step for simulation
         self.predict_time = 2.0  # How far ahead to predict (seconds)
         self.goal = None
         self.trajectories = []  # For visualization
         self.best_trajectory = None  # For visualization
+        
+        # Sample space parameters
+        self.v_samples = 10  # Number of linear velocity samples
+        self.w_samples = 10  # Number of angular velocity samples
+        self.v_min = 0.0  # Minimum linear velocity
+        self.v_max = max_speed  # Maximum linear velocity
+        self.w_min = -math.pi  # Minimum angular velocity
+        self.w_max = math.pi  # Maximum angular velocity
         
         # Scoring weights
         self.weights = {
@@ -43,6 +51,31 @@ class DWA:
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
     
+    def set_sample_space_params(self, v_samples=None, w_samples=None, 
+                              v_min=None, v_max=None, w_min=None, w_max=None):
+        """Modify the DWA sample space parameters.
+        
+        Args:
+            v_samples (int, optional): Number of linear velocity samples
+            w_samples (int, optional): Number of angular velocity samples
+            v_min (float, optional): Minimum linear velocity
+            v_max (float, optional): Maximum linear velocity
+            w_min (float, optional): Minimum angular velocity in radians
+            w_max (float, optional): Maximum angular velocity in radians
+        """
+        if v_samples is not None:
+            self.v_samples = max(2, v_samples)  # At least 2 samples
+        if w_samples is not None:
+            self.w_samples = max(2, w_samples)  # At least 2 samples
+        if v_min is not None:
+            self.v_min = max(0.0, v_min)  # Can't go backwards
+        if v_max is not None:
+            self.v_max = min(self.max_speed, v_max)  # Can't exceed max speed
+        if w_min is not None:
+            self.w_min = max(-math.pi, w_min)  # Limit to -π
+        if w_max is not None:
+            self.w_max = min(math.pi, w_max)  # Limit to π
+
     def update(self, dt: float, people: List[Person]):
         if self.goal is None:
             return
@@ -55,9 +88,9 @@ class DWA:
         best_v, best_w = 0.0, 0.0
         self.trajectories = []  # Reset for visualization
         
-        # Sample linear and angular velocities
-        for v in np.linspace(dw[0], dw[1], num=10):
-            for w in np.linspace(dw[2], dw[3], num=10):
+        # Sample linear and angular velocities using configured parameters
+        for v in np.linspace(max(dw[0], self.v_min), min(dw[1], self.v_max), num=self.v_samples):
+            for w in np.linspace(max(dw[2], self.w_min), min(dw[3], self.w_max), num=self.w_samples):
                 trajectory = self.predict_trajectory(v, w)
                 self.trajectories.append(trajectory)  # For visualization
                 
