@@ -37,6 +37,12 @@ class DWA:
         self.w_min = -math.pi  # Minimum angular velocity
         self.w_max = math.pi  # Maximum angular velocity
         
+        # Door-aware sampling parameters
+        self.door_position = None  # Will be set when door position is known
+        self.door_side = None  # Will be set when door side is known
+        self.door_influence_radius = 5.0  # Distance in meters where door affects sampling
+        self.door_sampling_bias = 0.7  # How strongly to bias sampling (0-1)
+        
         # Scoring weights
         self.weights = {
             'goal': 0.2,
@@ -76,12 +82,62 @@ class DWA:
         if w_max is not None:
             self.w_max = min(math.pi, w_max)  # Limit to π
 
+    def set_door_info(self, door_position: Tuple[float, float], door_side: str):
+        """Set the door position and side for door-aware sampling.
+        
+        Args:
+            door_position: (x,y) position of the door in world coordinates
+            door_side: "left" or "right" indicating which side of corridor the door is on
+        """
+        self.door_position = np.array(door_position)
+        self.door_side = door_side
+
+    def get_door_aware_sampling_params(self):
+        """Calculate sampling parameters based on proximity to door.
+        
+        Returns:
+            tuple: (w_min, w_max) angular velocity limits biased away from door
+        """
+        if self.door_position is None or self.door_side is None:
+            return self.w_min, self.w_max
+            
+        # Calculate distance to door
+        dist_to_door = np.linalg.norm(self.position - self.door_position)
+
+        # If far from door, use normal sampling
+        if dist_to_door > self.door_influence_radius:
+            return self.w_min, self.w_max
+            
+        # Calculate influence factor (1 when at door, 0 at influence radius)
+        influence = 1.0 - (dist_to_door / self.door_influence_radius)
+        influence *= self.door_sampling_bias  # Scale by bias factor
+        
+        # Calculate door-relative angle
+        door_direction = self.door_position - self.position
+        door_angle = math.atan2(door_direction[1], door_direction[0])
+        door_angle = self.normalize_angle(door_angle - self.orientation)
+        
+        # Determine which way to bias based on door side
+        if self.door_side == "right":
+            # Bias towards negative angles (left turns) when door is on right
+            w_min = -math.pi
+            w_max = math.pi * (1 - influence)
+        else:
+            # Bias towards positive angles (right turns) when door is on left
+            w_min = -math.pi * (1 - influence)
+            w_max = math.pi
+            
+        return w_min, w_max
+
     def update(self, dt: float, people: List[Person]):
         if self.goal is None:
             return
             
         # Generate dynamic window
         dw = self.dynamic_window()
+        
+        # Get door-aware sampling parameters
+        w_min, w_max = self.get_door_aware_sampling_params()
         
         # Sample velocities and evaluate
         best_score = -float('inf')
@@ -90,7 +146,8 @@ class DWA:
         
         # Sample linear and angular velocities using configured parameters
         for v in np.linspace(max(dw[0], self.v_min), min(dw[1], self.v_max), num=self.v_samples):
-            for w in np.linspace(max(dw[2], self.w_min), min(dw[3], self.w_max), num=self.w_samples):
+            # Use door-aware angular velocity limits
+            for w in np.linspace(max(dw[2], w_min), min(dw[3], w_max), num=self.w_samples):
                 trajectory = self.predict_trajectory(v, w)
                 self.trajectories.append(trajectory)  # For visualization
                 
