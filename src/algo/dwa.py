@@ -101,7 +101,7 @@ class DWA:
         if self.door_position is None or self.door_side is None:
             return self.w_min, self.w_max
             
-        # Calculate distance to door
+        # Calculate euclidean distance to door
         dist_to_door = np.linalg.norm(self.position - self.door_position)
 
         # If far from door, use normal sampling
@@ -122,6 +122,7 @@ class DWA:
             # Bias towards negative angles (left turns) when door is on right
             w_min = -math.pi
             w_max = math.pi * (1 - influence)
+            print(f"w_min: {w_min}, w_max: {w_max}")
         else:
             # Bias towards positive angles (right turns) when door is on left
             w_min = -math.pi * (1 - influence)

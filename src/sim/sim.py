@@ -53,7 +53,7 @@ class Simulation:
             door_y = 0.5  # 0.5m from left wall
         return (door_x, door_y)
     
-    def spawn_person_v0(self):
+    def spawn_person_with_target(self):
         if len(self.people) >= self.num_people:
             return
             
@@ -124,6 +124,9 @@ class Simulation:
         self.robot.draw(screen, self.scale, self.offset)
 
     def draw_v0(self, screen):
+        # Different from 'draw' function: Print the number of people, robot's speed, and robot's position
+        # on the screen
+
         # Draw corridor
         corridor_rect = pygame.Rect(
             self.offset[0],
