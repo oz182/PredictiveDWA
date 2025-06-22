@@ -40,7 +40,7 @@ class DWA:
         # Door-aware sampling parameters
         self.door_position = None  # Will be set when door position is known
         self.door_side = None  # Will be set when door side is known
-        self.door_influence_radius = 5.0  # Distance in meters where door affects sampling
+        self.door_influence_radius = 4.0  # Distance in meters where door affects sampling
         self.door_sampling_bias = 0.7  # How strongly to bias sampling (0-1)
         
         # Scoring weights
@@ -121,8 +121,8 @@ class DWA:
         if self.door_side == "right":
             # Bias towards negative angles (left turns) when door is on right
             w_min = -math.pi
-            w_max = math.pi * (1 - influence)
-            print(f"w_min: {w_min}, w_max: {w_max}")
+            w_max = math.pi - 2*math.pi*influence
+            #print(f"w_min: {w_min}, w_max: {w_max}")
         else:
             # Bias towards positive angles (right turns) when door is on left
             w_min = -math.pi * (1 - influence)
