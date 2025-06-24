@@ -160,9 +160,10 @@ class Simulation:
         # Display info
         font = pygame.font.SysFont(None, 24)
         info_text = [
-            f"People: {len(self.people)}/{self.num_people}",
-            f"Robot Vel: {np.linalg.norm(self.robot.velocity):.2f} m/s",
-            f"Position: ({self.robot.position[0]:.1f}, {self.robot.position[1]:.1f})"
+            #f"People: {len(self.people)}/{self.num_people}",
+            #f"Robot Vel: {np.linalg.norm(self.robot.velocity):.2f} m/s",
+            f"Position: ({self.robot.position[0]:.1f}, {self.robot.position[1]:.1f})",
+            #f"Distance to door: {self.robot.door_position:.1f}"
         ]
         
         for i, text in enumerate(info_text):

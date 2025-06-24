@@ -17,7 +17,10 @@ class DWA:
         self.corridor_bounds = corridor_bounds
 
         # DWA
-        self.orientation = 0.0  # Angle in radians (0 points to right)
+        if np.linalg.norm(velocity) > 1e-3:
+            self.orientation = math.atan2(velocity[1], velocity[0])
+        else:
+            self.orientation = 0.0  # Angle in radians (0 points to right)
         
         # DWA parameters
         self.max_rotation = math.pi  # Max angular velocity (rad/s)
@@ -40,8 +43,8 @@ class DWA:
         # Door-aware sampling parameters
         self.door_position = None  # Will be set when door position is known
         self.door_side = None  # Will be set when door side is known
-        self.door_influence_radius = 4.0  # Distance in meters where door affects sampling
-        self.door_sampling_bias = 0.7  # How strongly to bias sampling (0-1)
+        self.door_influence_radius = 4.5  # Distance in meters where door affects sampling
+        self.door_sampling_bias = 0.6  # How strongly to bias sampling (0-1)
         
         # Scoring weights
         self.weights = {
@@ -107,21 +110,28 @@ class DWA:
         # If far from door, use normal sampling
         if dist_to_door > self.door_influence_radius:
             return self.w_min, self.w_max
-            
-        # Calculate influence factor (1 when at door, 0 at influence radius)
-        influence = 1.0 - (dist_to_door / self.door_influence_radius)
-        influence *= self.door_sampling_bias  # Scale by bias factor
         
         # Calculate door-relative angle
         door_direction = self.door_position - self.position
         door_angle = math.atan2(door_direction[1], door_direction[0])
         door_angle = self.normalize_angle(door_angle - self.orientation)
+
+        # print the door angle, orientation and door direction in degrees
+        door_angle = math.degrees(door_angle)
+        door_direction = np.array([math.cos(math.radians(door_angle)), 
+                                   math.sin(math.radians(door_angle))])
+        orientation_deg = math.degrees(self.orientation)
         
+        # Calculate influence factor (1 when at door, 0 at influence radius)
+        # Use distance to door and orientation reletive to the door
+        influence = (1.0 - (dist_to_door / self.door_influence_radius)) + (1 - abs(door_angle) / 180.0)
+        influence *= self.door_sampling_bias  # Scale by bias factor
+
         # Determine which way to bias based on door side
         if self.door_side == "right":
             # Bias towards negative angles (left turns) when door is on right
             w_min = -math.pi
-            w_max = math.pi - 2*math.pi*influence
+            w_max = math.pi -(math.pi + math.pi/2)*influence
             #print(f"w_min: {w_min}, w_max: {w_max}")
         else:
             # Bias towards positive angles (right turns) when door is on left
@@ -322,4 +332,8 @@ class DWA:
             angle += 2 * math.pi
         return angle
     
+    def set_orientation(self, orientation: float):
+        """Set the robot's orientation (in radians)."""
+        self.orientation = self.normalize_angle(orientation)
+
 

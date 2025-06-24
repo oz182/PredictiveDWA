@@ -49,7 +49,7 @@ def main(render=False):
 
         if render:
             screen.fill((255, 255, 255))
-            sim.draw(screen)
+            sim.draw_v0(screen)
             pygame.display.flip()
 
         # Optionally stop headless simulation after some condition
