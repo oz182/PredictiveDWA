@@ -17,17 +17,34 @@ class DWA:
         self.corridor_bounds = corridor_bounds
 
         # DWA
-        self.orientation = 0.0  # Angle in radians (0 points to right)
+        if np.linalg.norm(velocity) > 1e-3:
+            self.orientation = math.atan2(velocity[1], velocity[0])
+        else:
+            self.orientation = 0.0  # Angle in radians (0 points to right)
         
         # DWA parameters
         self.max_rotation = math.pi  # Max angular velocity (rad/s)
-        self.max_accel = 1.0  * 4# Max linear acceleration (m/s²)
-        self.max_angular_accel = math.pi * 2 # Max angular acceleration (rad/s²)
+        self.max_accel = 1.0 * 4  # Max linear acceleration (m/s²)
+        self.max_angular_accel = math.pi * 2  # Max angular acceleration (rad/s²)
         self.dt = 0.1  # Time step for simulation
         self.predict_time = 2.0  # How far ahead to predict (seconds)
         self.goal = None
         self.trajectories = []  # For visualization
         self.best_trajectory = None  # For visualization
+        
+        # Sample space parameters
+        self.v_samples = 10  # Number of linear velocity samples
+        self.w_samples = 10  # Number of angular velocity samples
+        self.v_min = 0.0  # Minimum linear velocity
+        self.v_max = max_speed  # Maximum linear velocity
+        self.w_min = -math.pi  # Minimum angular velocity
+        self.w_max = math.pi  # Maximum angular velocity
+        
+        # Door-aware sampling parameters
+        self.door_position = None  # Will be set when door position is known
+        self.door_side = None  # Will be set when door side is known
+        self.door_influence_radius = 4.5  # Distance in meters where door affects sampling
+        self.door_sampling_bias = 0.6  # How strongly to bias sampling (0-1)
         
         # Scoring weights
         self.weights = {
@@ -43,6 +60,86 @@ class DWA:
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
     
+    def set_sample_space_params(self, v_samples=None, w_samples=None, 
+                              v_min=None, v_max=None, w_min=None, w_max=None):
+        """Modify the DWA sample space parameters.
+        
+        Args:
+            v_samples (int, optional): Number of linear velocity samples
+            w_samples (int, optional): Number of angular velocity samples
+            v_min (float, optional): Minimum linear velocity
+            v_max (float, optional): Maximum linear velocity
+            w_min (float, optional): Minimum angular velocity in radians
+            w_max (float, optional): Maximum angular velocity in radians
+        """
+        if v_samples is not None:
+            self.v_samples = max(2, v_samples)  # At least 2 samples
+        if w_samples is not None:
+            self.w_samples = max(2, w_samples)  # At least 2 samples
+        if v_min is not None:
+            self.v_min = max(0.0, v_min)  # Can't go backwards
+        if v_max is not None:
+            self.v_max = min(self.max_speed, v_max)  # Can't exceed max speed
+        if w_min is not None:
+            self.w_min = max(-math.pi, w_min)  # Limit to -π
+        if w_max is not None:
+            self.w_max = min(math.pi, w_max)  # Limit to π
+
+    def set_door_info(self, door_position: Tuple[float, float], door_side: str):
+        """Set the door position and side for door-aware sampling.
+        
+        Args:
+            door_position: (x,y) position of the door in world coordinates
+            door_side: "left" or "right" indicating which side of corridor the door is on
+        """
+        self.door_position = np.array(door_position)
+        self.door_side = door_side
+
+    def get_door_aware_sampling_params(self):
+        """Calculate sampling parameters based on proximity to door.
+        
+        Returns:
+            tuple: (w_min, w_max) angular velocity limits biased away from door
+        """
+        if self.door_position is None or self.door_side is None:
+            return self.w_min, self.w_max
+            
+        # Calculate euclidean distance to door
+        dist_to_door = np.linalg.norm(self.position - self.door_position)
+
+        # If far from door, use normal sampling
+        if dist_to_door > self.door_influence_radius:
+            return self.w_min, self.w_max
+        
+        # Calculate door-relative angle
+        door_direction = self.door_position - self.position
+        door_angle = math.atan2(door_direction[1], door_direction[0])
+        door_angle = self.normalize_angle(door_angle - self.orientation)
+
+        # print the door angle, orientation and door direction in degrees
+        door_angle = math.degrees(door_angle)
+        door_direction = np.array([math.cos(math.radians(door_angle)), 
+                                   math.sin(math.radians(door_angle))])
+        orientation_deg = math.degrees(self.orientation)
+        
+        # Calculate influence factor (1 when at door, 0 at influence radius)
+        # Use distance to door and orientation reletive to the door
+        influence = (1.0 - (dist_to_door / self.door_influence_radius)) + (1 - abs(door_angle) / 180.0)
+        influence *= self.door_sampling_bias  # Scale by bias factor
+
+        # Determine which way to bias based on door side
+        if self.door_side == "right":
+            # Bias towards negative angles (left turns) when door is on right
+            w_min = -math.pi
+            w_max = math.pi -(math.pi + math.pi/2)*influence
+            #print(f"w_min: {w_min}, w_max: {w_max}")
+        else:
+            # Bias towards positive angles (right turns) when door is on left
+            w_min = -math.pi * (1 - influence)
+            w_max = math.pi
+            
+        return w_min, w_max
+
     def update(self, dt: float, people: List[Person]):
         if self.goal is None:
             return
@@ -50,14 +147,18 @@ class DWA:
         # Generate dynamic window
         dw = self.dynamic_window()
         
+        # Get door-aware sampling parameters
+        w_min, w_max = self.get_door_aware_sampling_params()
+        
         # Sample velocities and evaluate
         best_score = -float('inf')
         best_v, best_w = 0.0, 0.0
         self.trajectories = []  # Reset for visualization
         
-        # Sample linear and angular velocities
-        for v in np.linspace(dw[0], dw[1], num=10):
-            for w in np.linspace(dw[2], dw[3], num=10):
+        # Sample linear and angular velocities using configured parameters
+        for v in np.linspace(max(dw[0], self.v_min), min(dw[1], self.v_max), num=self.v_samples):
+            # Use door-aware angular velocity limits
+            for w in np.linspace(max(dw[2], w_min), min(dw[3], w_max), num=self.w_samples):
                 trajectory = self.predict_trajectory(v, w)
                 self.trajectories.append(trajectory)  # For visualization
                 
@@ -231,4 +332,8 @@ class DWA:
             angle += 2 * math.pi
         return angle
     
+    def set_orientation(self, orientation: float):
+        """Set the robot's orientation (in radians)."""
+        self.orientation = self.normalize_angle(orientation)
+
 
