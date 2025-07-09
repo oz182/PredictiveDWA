@@ -131,7 +131,7 @@ class DWA:
         if self.door_side == "right":
             # Bias towards negative angles (left turns) when door is on right
             w_min = -math.pi
-            w_max = math.pi -(math.pi + math.pi/2)*influence
+            w_max = max(math.pi -(math.pi + math.pi/2)*influence, -math.pi)
             #print(f"w_min: {w_min}, w_max: {w_max}")
         else:
             # Bias towards positive angles (right turns) when door is on left
