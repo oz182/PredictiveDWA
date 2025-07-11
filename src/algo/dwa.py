@@ -33,8 +33,8 @@ class DWA:
         self.best_trajectory = None  # For visualization
         
         # Sample space parameters
-        self.v_samples = 10  # Number of linear velocity samples
-        self.w_samples = 10  # Number of angular velocity samples
+        self.v_samples = 12  # Number of linear velocity samples
+        self.w_samples = 12  # Number of angular velocity samples
         self.v_min = 0.0  # Minimum linear velocity
         self.v_max = max_speed  # Maximum linear velocity
         self.w_min = -math.pi  # Minimum angular velocity
@@ -43,14 +43,14 @@ class DWA:
         # Door-aware sampling parameters
         self.door_position = None  # Will be set when door position is known
         self.door_side = None  # Will be set when door side is known
-        self.door_influence_radius = 4.5  # Distance in meters where door affects sampling
-        self.door_sampling_bias = 0.6  # How strongly to bias sampling (0-1)
+        self.door_influence_radius = 7.5  # Distance in meters where door affects sampling
+        self.door_sampling_bias = 0.75  # How strongly to bias sampling (0-1)
         
         # Scoring weights
         self.weights = {
             'goal': 0.2,
-            'clearance': 0.6,
-            'velocity': 0.2
+            'clearance': 0.7,
+            'velocity': 0.1
         }
         
         # Robot dynamics
@@ -121,17 +121,23 @@ class DWA:
         door_direction = np.array([math.cos(math.radians(door_angle)), 
                                    math.sin(math.radians(door_angle))])
         orientation_deg = math.degrees(self.orientation)
+        print(f"Door angle: {door_angle:.2f}°")
         
         # Calculate influence factor (1 when at door, 0 at influence radius)
         # Use distance to door and orientation reletive to the door
-        influence = (1.0 - (dist_to_door / self.door_influence_radius)) + (1 - abs(door_angle) / 180.0)
+        influence = (1.0 - (dist_to_door / self.door_influence_radius)) + (1 - (abs(door_angle) / 180.0))
         influence *= self.door_sampling_bias  # Scale by bias factor
+
+        # Function to clamp values to a range
+        clamp = lambda n, minn, maxn: max(min(maxn, n), minn)
 
         # Determine which way to bias based on door side
         if self.door_side == "right":
             # Bias towards negative angles (left turns) when door is on right
             w_min = -math.pi
-            w_max = math.pi -(math.pi + math.pi/2)*influence
+            #w_max = clamp(math.pi -(math.pi + math.pi/2)*influence, -math.pi, math.pi)
+            #w_max = clamp(math.pi * (1 - influence) + math.radians(abs(door_angle)), -math.pi, math.pi)
+            w_max = (math.pi + math.radians(abs(door_angle))) * (1 - influence)
             #print(f"w_min: {w_min}, w_max: {w_max}")
         else:
             # Bias towards positive angles (right turns) when door is on left
