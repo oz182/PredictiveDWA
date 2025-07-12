@@ -8,7 +8,8 @@ from copy import deepcopy, copy
 from sim.person import Person
 from algo.simple import Simple
 from algo.dwa import DWA
-
+from algo.ts_dwa import TSDWA
+from algo.ts_dwa_Try import TSDWA_2
 
 
 class Robot:
@@ -24,7 +25,9 @@ class Robot:
 
 
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
-        self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        #self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        #self.nav = TSDWA_2(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         self.nav_type = "dwa"
 
         # Learning
