@@ -10,6 +10,7 @@ from algo.simple import Simple
 from algo.dwa import DWA
 from algo.ts_dwa import TSDWA
 from algo.ts_dwa_Try import TSDWA_2
+from algo.global_planner import StraightLineGlobalPlanner
 
 
 class Robot:
@@ -23,12 +24,18 @@ class Robot:
         self.door_position = door_position
         self.people = None
 
+        # ------ Global planner (straight hallway centre-line) ------
+        corridor_length = self.corridor_bounds['x_max'] - self.corridor_bounds['x_min']
+        corridor_width  = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
+        self.global_planner = StraightLineGlobalPlanner(corridor_length, corridor_width, resolution=0.25)
+        self.global_path = None  # will be initialised after goal is set
 
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
-        #self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
-        self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        #self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         #self.nav = TSDWA_2(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         self.nav_type = "dwa"
+        #self.nav_type = "ts_dwa"
 
         # Learning
         self.state = None
@@ -38,12 +45,18 @@ class Robot:
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
         self.nav.set_goal(goal)
+        # Compute (or recompute) global path whenever a new goal is set
+        self.global_path = self.global_planner.plan(tuple(self.position), tuple(goal))
     
     def update(self, dt: float, people: List[Person]):
         self.people = people
         if self.goal is None:
             return
-        self.velocity, self.position, self.goal = self.nav.update(dt, people)
+        # Pass global path to TS-DWA; other planners ignore the extra arg
+        if self.nav_type == "ts_dwa":
+            self.velocity, self.position, self.goal = self.nav.update(dt, people, self.global_path)
+        else:
+            self.velocity, self.position, self.goal = self.nav.update(dt, people)
 
         # Get state, reward and done
         nav_info = self.get_navigation_info(2)
@@ -256,7 +269,7 @@ class Robot:
             # Draw direction indicator
             end_pos = (self.position + self.velocity * 0.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
-        elif self.nav_type == "dwa":
+        elif self.nav_type in ("dwa", "ts_dwa"):
             # Draw robot
             pos = (self.position * scale + offset).astype(int)
             pygame.draw.circle(screen, (0, 0, 255), pos, int(self.radius * scale))
