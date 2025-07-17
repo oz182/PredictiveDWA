@@ -25,8 +25,8 @@ def main(render=False):
     sim = Simulation(
         corridor_width=4.0,
         door_side="right",  # Try "left" or "right"
-        num_people=3,
-        people_speeds=[random.uniform(2.0, 2.5) for _ in range(10)]
+        num_people=2,
+        people_speeds=[random.uniform(1.0, 1.5) for _ in range(10)]
     )
 
     running = True

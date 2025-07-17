@@ -13,7 +13,7 @@ class Simulation:
         self.corridor_width = corridor_width
         self.door_side = door_side
         self.num_people = num_people
-        self.people_speeds = people_speeds if people_speeds else [random.uniform(2.0, 2.5) for _ in range(num_people)]
+        self.people_speeds = people_speeds if people_speeds else [random.uniform(1.0, 1.5) for _ in range(num_people)]
         
         # Corridor dimensions
         self.corridor_length = 20.0
@@ -26,7 +26,7 @@ class Simulation:
         }
         
         # Initialize agents
-        self.robot = Robot((1.0, corridor_width/2), 0.5, self.corridor_bounds, self.get_door_position())
+        self.robot = Robot((1.0, corridor_width/2), 0.2, self.corridor_bounds, self.get_door_position())
         self.robot.set_goal((self.corridor_length - 1.0, corridor_width/1.2 + 0.5))
         
         # Set door information for DWA
