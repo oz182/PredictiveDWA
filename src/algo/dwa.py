@@ -49,10 +49,9 @@ class DWA:
         
         # Scoring weights
         self.weights = {
-            'goal': 0.25,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
+            'goal': 0.3,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
             'clearance': 0.3, # Moderate weight on clearance 
             'velocity': 0.4,  # Lower weight on velocity
-            'wall_clearance': 0.05  # Light weight on wall clearance (less important than people)
         }
         
         # Robot dynamics
@@ -65,30 +64,6 @@ class DWA:
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
     
-    def set_sample_space_params(self, v_samples=None, w_samples=None, 
-                              v_min=None, v_max=None, w_min=None, w_max=None):
-        """Modify the DWA sample space parameters.
-        
-        Args:
-            v_samples (int, optional): Number of linear velocity samples
-            w_samples (int, optional): Number of angular velocity samples
-            v_min (float, optional): Minimum linear velocity
-            v_max (float, optional): Maximum linear velocity
-            w_min (float, optional): Minimum angular velocity in radians
-            w_max (float, optional): Maximum angular velocity in radians
-        """
-        if v_samples is not None:
-            self.v_samples = max(2, v_samples)  # At least 2 samples
-        if w_samples is not None:
-            self.w_samples = max(2, w_samples)  # At least 2 samples
-        if v_min is not None:
-            self.v_min = max(-2.0, v_min)  # Can't go backwards
-        if v_max is not None:
-            self.v_max = min(self.max_speed, v_max)  # Can't exceed max speed
-        if w_min is not None:
-            self.w_min = max(-math.pi, w_min)  # Limit to -π
-        if w_max is not None:
-            self.w_max = min(math.pi, w_max)  # Limit to π
 
     def set_door_info(self, door_position: Tuple[float, float], door_side: str):
         """Set the door position and side for door-aware sampling.
@@ -191,8 +166,7 @@ class DWA:
                 
                 # Calculate scores
                 goal_score = self.goal_score(trajectory)
-                clearance_score = self.clearance_score_v0(trajectory, people)
-                wall_clearance_score = self.wall_clearance_score(trajectory)
+                clearance_score = self.clearance_score(trajectory, people)
                 
                 # Velocity score: prefer higher speeds but don't penalize too much for lower speeds
                 velocity_score = v / self.max_speed if v > 0 else 0
@@ -200,7 +174,6 @@ class DWA:
                 # Total weighted score
                 total_score = (self.weights['goal'] * goal_score +
                               self.weights['clearance'] * clearance_score +
-                              self.weights['wall_clearance'] * wall_clearance_score +
                               self.weights['velocity'] * velocity_score)
                 
                 if total_score > best_score:
@@ -328,7 +301,7 @@ class DWA:
         # Check distance to corridor boundaries if they exist
         if hasattr(self, 'corridor_bounds'):
             bounds = self.corridor_bounds
-            for point in trajectory:
+            for point in trajectory[:2]:
                 # Distance to left wall (x_min)
                 dist_left = point[0] - bounds['x_min'] - self.radius
                 # Distance to right wall (x_max)
@@ -392,7 +365,7 @@ class DWA:
         safe_distance = 1.0  # 1 m considered comfortable around people
         return min(min_dist_people / safe_distance, 1.0)
     
-    def wall_clearance_score(self, trajectory):
+
         """Calculate wall clearance score that penalizes proximity to walls but allows getting close.
         
         This method treats walls as soft constraints - the robot can get close to walls
