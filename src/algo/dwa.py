@@ -322,8 +322,8 @@ class DWA:
         # Normalize to [0, 1] range with 1 being safe distance
         safe_distance = 1.0  # 1 meter is considered safe
         return min(min_distance / safe_distance, 1.0)
-    
 
+    def clearance_score_v2(self, trajectory, people):
         """Return a clearance score that:
         1. Considers *people* distances for grading (like clearance_score_v0).
         2. Treats *corridor walls* as hard constraints – a trajectory that
@@ -364,8 +364,8 @@ class DWA:
             return 1.0  # no people encountered
         safe_distance = 1.0  # 1 m considered comfortable around people
         return min(min_dist_people / safe_distance, 1.0)
-    
 
+    def clearance_score_v3(self, trajectory, people):
         """Calculate wall clearance score that penalizes proximity to walls but allows getting close.
         
         This method treats walls as soft constraints - the robot can get close to walls
