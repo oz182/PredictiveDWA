@@ -49,9 +49,9 @@ class DWA:
         
         # Scoring weights
         self.weights = {
-            'goal': 0.3,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
+            'goal': 0.6,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
             'clearance': 0.3, # Moderate weight on clearance 
-            'velocity': 0.4,  # Lower weight on velocity
+            'velocity': 0.1,  # Lower weight on velocity
         }
         
         # Robot dynamics
@@ -300,7 +300,7 @@ class DWA:
         # Check distance to corridor boundaries if they exist
         if hasattr(self, 'corridor_bounds'):
             bounds = self.corridor_bounds
-            for point in trajectory[:2]:
+            for point in trajectory[:6]:
                 # Distance to left wall (x_min)
                 dist_left = point[0] - bounds['x_min'] - self.radius
                 # Distance to right wall (x_max)
