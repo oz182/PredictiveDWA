@@ -34,8 +34,8 @@ class DWA:
         self.best_trajectory = None  # For visualization
         
         # Sample space parameters
-        self.v_samples = 15  # Number of linear velocity samples
-        self.w_samples = 15  # Number of angular velocity samples
+        self.v_samples = 8  # Number of linear velocity samples
+        self.w_samples = 8  # Number of angular velocity samples
         self.v_min = 0.0  # Minimum linear velocity
         self.v_max = max_speed  # Maximum linear velocity
         self.w_min = -math.pi  # Minimum angular velocity
@@ -63,7 +63,6 @@ class DWA:
 
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
-    
 
     def set_door_info(self, door_position: Tuple[float, float], door_side: str):
         """Set the door position and side for door-aware sampling.
