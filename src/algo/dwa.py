@@ -27,7 +27,7 @@ class DWA:
         self.max_rotation = math.pi  # Max angular velocity (rad/s)
         self.max_accel = 1.0 * 4  # Max linear acceleration (m/s²)
         self.max_angular_accel = math.pi * 2  # Max angular acceleration (rad/s²)
-        self.dt = 0.1  # Time step for simulation
+        self.dt = 0.167  # Time step for simulation
         self.predict_time = 2.0  # How far ahead to predict (seconds)
         self.goal = None
         self.trajectories = []  # For visualization
@@ -49,9 +49,9 @@ class DWA:
         
         # Scoring weights
         self.weights = {
-            'goal': 0.5,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
+            'goal': 0.1,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
             'clearance': 0.5, # Moderate weight on clearance 
-            'velocity': 0.2   # Lower weight on velocity
+            'velocity': 0.4  # Lower weight on velocity
         }
         
         # Robot dynamics
