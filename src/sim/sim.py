@@ -26,7 +26,7 @@ class Simulation:
         }
         
         # Initialize agents
-        self.robot = Robot((1.0, corridor_width/2), 0.2, self.corridor_bounds, self.get_door_position())
+        self.robot = Robot((0.5, corridor_width/2), 0.2, self.corridor_bounds, self.get_door_position())
         self.robot.set_goal((self.corridor_length - 1.0, corridor_width/1.2 + 0.5))
         
         # Set door information for DWA
