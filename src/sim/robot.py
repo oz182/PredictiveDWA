@@ -31,11 +31,12 @@ class Robot:
         self.global_path = None  # will be initialised after goal is set
 
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
-        self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
-        #self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        #self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         #self.nav = TSDWA_2(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
-        self.nav_type = "dwa"
-        #self.nav_type = "ts_dwa"
+        
+        #self.nav_type = "dwa"
+        self.nav_type = "ts_dwa"
 
         # Learning
         self.state = None
