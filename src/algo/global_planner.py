@@ -30,27 +30,67 @@ class StraightLineGlobalPlanner:
     def plan(self, start: Tuple[float, float], goal: Tuple[float, float]) -> List[np.ndarray]:
         """Compute a straight-line path between *start* and *goal*.
 
-        The path is constrained to lie along the corridor centre-line (y = W/2).
-        The *x*-coordinates are linearly interpolated from the robot's start
-        position to the goal.
+        The path follows a straight line from start to goal, with intermediate
+        waypoints along the corridor centerline for smooth navigation.
         """
         start = np.array(start, dtype=float)
         goal = np.array(goal, dtype=float)
 
-        # Middle of the hallway (y-coordinate)
+        # Middle of the hallway (y-coordinate) for intermediate waypoints
         y_mid = self.corridor_width / 2.0
 
-        # Generate samples along the x-axis
+        # Calculate the total distance to travel
+        total_distance = np.linalg.norm(goal - start)
+        
+        # If start and goal are very close, just return direct path
+        if total_distance < self.resolution:
+            return [start, goal]
+
+        # Generate intermediate waypoints along the corridor centerline
+        # First, move from start to centerline
+        start_to_center = np.array([start[0], y_mid])
+        
+        # Then, move along centerline towards goal
+        # Calculate how many waypoints we need
+        center_distance = abs(goal[0] - start[0])
+        num_waypoints = max(1, int(center_distance / self.resolution))
+        
+        # Generate waypoints along centerline
         if start[0] <= goal[0]:
-            xs = np.arange(start[0], goal[0] + 1e-6, self.resolution)
+            xs = np.linspace(start[0], goal[0], num_waypoints + 1)
         else:
-            xs = np.arange(start[0], goal[0] - 1e-6, -self.resolution)
-
-        # Assemble way-points (ensure start & goal included)
-        waypoints = [np.array([x, y_mid]) for x in xs]
-        if not np.allclose(waypoints[0], start):
-            waypoints.insert(0, np.array([start[0], y_mid]))
-        if not np.allclose(waypoints[-1], goal):
-            waypoints.append(np.array([goal[0], y_mid]))
-
-        return waypoints 
+            xs = np.linspace(start[0], goal[0], num_waypoints + 1)
+        
+        # Assemble the complete path
+        waypoints = []
+        
+        # Add start point
+        waypoints.append(start)
+        
+        # Add intermediate waypoints along centerline (skip if start is already on centerline)
+        if not np.isclose(start[1], y_mid, atol=0.1):
+            waypoints.append(start_to_center)
+        
+        # Add waypoints along centerline
+        for x in xs[1:-1]:  # Skip first and last to avoid duplicates
+            waypoints.append(np.array([x, y_mid]))
+        
+        # Add goal point (skip if goal is already on centerline)
+        if not np.isclose(goal[1], y_mid, atol=0.1):
+            goal_from_center = np.array([goal[0], y_mid])
+            if len(waypoints) == 0 or not np.allclose(waypoints[-1], goal_from_center):
+                waypoints.append(goal_from_center)
+        
+        # Always add the exact goal point at the end
+        waypoints.append(goal)
+        
+        # Ensure all waypoints are within corridor bounds
+        bounded_waypoints = []
+        for wp in waypoints:
+            bounded_wp = np.array([
+                np.clip(wp[0], 0, self.corridor_length),
+                np.clip(wp[1], 0, self.corridor_width)
+            ])
+            bounded_waypoints.append(bounded_wp)
+        
+        return bounded_waypoints 

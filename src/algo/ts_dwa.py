@@ -255,7 +255,7 @@ class TSDWA:
                     return -float("inf")
         # corridor collisions
         bounds = self.corridor_bounds
-        for p in traj:
+        for p in traj[:2]:
             dists = [
                 p[0] - bounds["x_min"] - self.radius,
                 bounds["x_max"] - p[0] - self.radius,

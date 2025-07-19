@@ -285,6 +285,21 @@ class Robot:
             ]) * self.radius * 1.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
             
+            # Draw global path as green line
+            if self.global_path is not None and len(self.global_path) > 1:
+                global_path_points = [(p * scale + offset).astype(int) for p in self.global_path]
+                pygame.draw.lines(screen, (0, 255, 0), False, global_path_points, 3)  # Green, thick line
+                
+                # Draw waypoints along the global path
+                for i, waypoint in enumerate(self.global_path):
+                    wp_pos = (waypoint * scale + offset).astype(int)
+                    if i == 0:  # Start point
+                        pygame.draw.circle(screen, (0, 255, 0), wp_pos, 5)  # Green circle
+                    elif i == len(self.global_path) - 1:  # End point
+                        pygame.draw.circle(screen, (255, 0, 0), wp_pos, 5)  # Red circle
+                    else:  # Intermediate waypoints
+                        pygame.draw.circle(screen, (0, 200, 0), wp_pos, 3)  # Darker green
+            
             # Draw all sampled trajectories (faint)
             for traj in self.nav.trajectories:
                 points = [(p * scale + offset).astype(int) for p in traj]
