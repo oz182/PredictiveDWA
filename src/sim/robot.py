@@ -292,7 +292,7 @@ class Robot:
             costmap = self.get_egocentric_costmap(size=size, resolution=0.1)
             
             # Create a colored version of the costmap (red for obstacles)
-            colored_costmap = np.zeros((*costmap.shape, 4), dtype=np.uint8)  # Now with 4 channels (RGBA)
+            colored_costmap = np.zeros((*costmap.shape, int(size)), dtype=np.uint8)  # Now with 4 channels (RGBA)
             colored_costmap[..., 0] = costmap  # Red channel
             colored_costmap[..., 1] = 0        # Green channel
             colored_costmap[..., 2] = 0        # Blue channel

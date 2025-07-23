@@ -299,8 +299,8 @@ class DWA:
         
         # Check distance to corridor boundaries if they exist
         if hasattr(self, 'corridor_bounds'):
-            bounds = self.corridor_bounds
-            for point in trajectory[:6]:
+            bounds = self.corridor_bounds  # Need to take in account the we need to extract the walls from the cost map
+            for point in trajectory[:6]:  # Change the number (6) to formula: for example: f(trajectory_length, corridor_width)
                 # Distance to left wall (x_min)
                 dist_left = point[0] - bounds['x_min'] - self.radius
                 # Distance to right wall (x_max)
