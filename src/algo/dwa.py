@@ -61,6 +61,9 @@ class DWA:
         # Door angle in robot frame (set by robot.py)
         self.door_angle_robot_frame = None
 
+        # Wall checking parameters
+        self.wall_check_points = 6  # Default value, will be updated dynamically
+
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
 
@@ -297,10 +300,15 @@ class DWA:
                     if min_distance <= 0:  # Collision
                         return -float('inf')
         
+        # Update wall check points based on trajectory length and corridor width
+        corridor_width = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
+        self.wall_check_points = max(1, int(len(trajectory) / (0.5 * corridor_width)))
+        
         # Check distance to corridor boundaries if they exist
+        
         if hasattr(self, 'corridor_bounds'):
             bounds = self.corridor_bounds  # Need to take in account the we need to extract the walls from the cost map
-            for point in trajectory[:6]:  # Change the number (6) to formula: for example: f(trajectory_length, corridor_width)
+            for point in trajectory[:self.wall_check_points]:  # Use dynamic parameter
                 # Distance to left wall (x_min)
                 dist_left = point[0] - bounds['x_min'] - self.radius
                 # Distance to right wall (x_max)
