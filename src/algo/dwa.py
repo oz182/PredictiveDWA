@@ -148,8 +148,8 @@ class DWA:
         dw = self.dynamic_window()
         
         # Get door-aware sampling parameters
-        w_min, w_max = self.get_door_aware_sampling_params()
-        #w_min, w_max = -math.pi, math.pi
+        #w_min, w_max = self.get_door_aware_sampling_params()
+        w_min, w_max = -math.pi, math.pi
         
         # Sample velocities and evaluate
         best_score = -float('inf')
