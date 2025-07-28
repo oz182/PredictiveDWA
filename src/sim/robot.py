@@ -11,6 +11,7 @@ from algo.dwa import DWA
 from algo.ts_dwa import TSDWA
 from algo.ts_dwa_Try import TSDWA_2
 from algo.global_planner import StraightLineGlobalPlanner
+from algo.global_planner import AStarGlobalPlanner
 
 
 class Robot:
@@ -24,10 +25,24 @@ class Robot:
         self.door_position = door_position
         self.people = None
 
-        # ------ Global planner (straight hallway centre-line) ------
+        # ------ Global planner (A* with door avoidance) ------
         corridor_length = self.corridor_bounds['x_max'] - self.corridor_bounds['x_min']
         corridor_width  = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
-        self.global_planner = StraightLineGlobalPlanner(corridor_length, corridor_width, resolution=0.25)
+
+        # Get door information from simulation
+        door_pos = self.door_position
+        door_side = "right"  # You'll need to pass this from simulation
+        if door_pos[1] < corridor_width / 2:
+            door_side = "left"
+
+        self.global_planner = AStarGlobalPlanner(
+            corridor_length, 
+            corridor_width, 
+            door_pos, 
+            door_side,
+            resolution=0.25,
+            door_halo_radius=1.0  # 1 meter radius around door
+        )
         self.global_path = None  # will be initialised after goal is set
 
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
@@ -67,7 +82,7 @@ class Robot:
 
         return deepcopy(self.state), self.reward, self.done     
 
-    def get_egocentric_costmap(self, size=8.0, resolution=0.1, inflation_radius=0.2):
+    def get_egocentric_costmap(self, size=4.0, resolution=0.1, inflation_radius=0.2):
         """
         Generate an egocentric costmap centered on the robot.
         
