@@ -31,7 +31,8 @@ class Robot:
 
         # Get door information from simulation
         door_pos = self.door_position
-        door_side = "right"  # You'll need to pass this from simulation
+        # Determine door side based on door position
+        door_side = "right"  # Default
         if door_pos[1] < corridor_width / 2:
             door_side = "left"
 

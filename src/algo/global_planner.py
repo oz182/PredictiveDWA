@@ -160,13 +160,13 @@ class AStarGlobalPlanner:
         door_x = self.door_position[0]
         door_y = self.door_position[1]
         
-        # Determine which side of the door to go around
+        # Determine which side of the door to go around (more subtle deviation)
         if self.door_side == "right":
             # Door is on right side, go around on the left (closer to left wall)
-            avoid_y = y_center - self.door_halo_radius - 0.5  # Move left from centerline
+            avoid_y = y_center - (self.door_halo_radius * 0.6) - 0.3  # More subtle deviation
         else:
             # Door is on left side, go around on the right (closer to right wall)
-            avoid_y = y_center + self.door_halo_radius + 0.5  # Move right from centerline
+            avoid_y = y_center + (self.door_halo_radius * 0.6) + 0.3  # More subtle deviation
         
         # Clamp avoid_y to corridor bounds with more reasonable limits
         avoid_y = np.clip(avoid_y, 0.5, self.corridor_width - 0.5)
@@ -182,25 +182,28 @@ class AStarGlobalPlanner:
             center_start = np.array([start[0], y_center])
             waypoints.append(center_start)
         
-        # 3. Move along centerline until approaching door
-        approach_x = door_x - self.door_halo_radius - 1.0  # 1m before door
+        # 3. Move along centerline until approaching door (start curve earlier)
+        approach_x = max(0.5, door_x - self.door_halo_radius - 3.0)  # 3m before door, but not before corridor
         if approach_x > start[0]:
             # Add intermediate points along centerline
             num_approach_points = max(5, int((approach_x - start[0]) / self.resolution))
             for i in range(1, num_approach_points + 1):
                 t = i / (num_approach_points + 1)
                 x = start[0] + t * (approach_x - start[0])
+                x = np.clip(x, 0.5, self.corridor_length - 0.5)  # Ensure within bounds
                 center_point = np.array([x, y_center])
                 waypoints.append(center_point)
         
             center_approach = np.array([approach_x, y_center])
             waypoints.append(center_approach)
         
-        # 4. Curve around the door with more points
+        # 4. Curve around the door with more points (longer, more subtle curve)
         # Create a smooth curved path around the door
-        curve_points = 20  # Increased for smoother curve
-        curve_start_x = door_x - self.door_halo_radius - 0.5
-        curve_end_x = door_x + self.door_halo_radius + 0.5
+        curve_points = 30  # Increased for smoother curve
+        
+        # Ensure curve stays within corridor bounds
+        curve_start_x = max(0.5, door_x - self.door_halo_radius - 2.5)  # Start curve earlier, but not before corridor
+        curve_end_x = min(self.corridor_length - 0.5, door_x + self.door_halo_radius + 2.5)   # End curve later, but not after corridor
         
         for i in range(curve_points + 1):
             t = i / curve_points
@@ -217,11 +220,15 @@ class AStarGlobalPlanner:
                 # Curve from centerline to avoid_y and back (smooth S-curve)
                 curve_y = y_center + (avoid_y - y_center) * (math.sin(math.pi * t) + 0.2 * math.sin(2 * math.pi * t))
             
+            # Ensure curve point is within corridor bounds
+            curve_x = np.clip(curve_x, 0.5, self.corridor_length - 0.5)
+            curve_y = np.clip(curve_y, 0.5, self.corridor_width - 0.5)
+            
             curve_point = np.array([curve_x, curve_y])
             waypoints.append(curve_point)
         
-        # 5. Return to centerline after door
-        exit_x = door_x + self.door_halo_radius + 1.0  # 1m after door
+        # 5. Return to centerline after door (extended to match longer curve)
+        exit_x = min(self.corridor_length - 0.5, door_x + self.door_halo_radius + 3.0)  # 3m after door, but not after corridor
         if exit_x < goal[0]:
             center_exit = np.array([exit_x, y_center])
             waypoints.append(center_exit)
@@ -233,6 +240,7 @@ class AStarGlobalPlanner:
                 for i in range(1, num_exit_points + 1):
                     t = i / (num_exit_points + 1)
                     x = exit_x + t * (goal[0] - exit_x)
+                    x = np.clip(x, 0.5, self.corridor_length - 0.5)  # Ensure within bounds
                     center_point = np.array([x, y_center])
                     waypoints.append(center_point)
                 
@@ -241,20 +249,23 @@ class AStarGlobalPlanner:
         
         # 7. Final goal point
         waypoints.append(goal)
-        print(f"Door position: ({door_x}, {door_y})")
-        print(f"Door side: {self.door_side}")
-        print(f"Centerline: {y_center}")
-        print(f"Avoid_y: {avoid_y}")
-        print(f"Waypoints y-values: {[wp[1] for wp in waypoints]}")
         
         # Ensure all waypoints are within corridor bounds
         bounded_waypoints = []
-        for wp in waypoints:
+        for i, wp in enumerate(waypoints):
             bounded_wp = np.array([
                 np.clip(wp[0], 0, self.corridor_length),
                 np.clip(wp[1], 0, self.corridor_width)
             ])
+            if not np.array_equal(wp, bounded_wp):
+                print(f"Waypoint {i} clipped: {wp} -> {bounded_wp}")
             bounded_waypoints.append(bounded_wp)
+        
+        # Additional debugging: check each waypoint individually
+        for i, wp in enumerate(bounded_waypoints):
+            if wp[0] < 0 or wp[0] > self.corridor_length or wp[1] < 0 or wp[1] > self.corridor_width:
+                print(f"WARNING: Waypoint {i} is still out of bounds: {wp}")
+                print(f"  Corridor bounds: x=[0, {self.corridor_length}], y=[0, {self.corridor_width}]")
         
         return bounded_waypoints
 
@@ -275,7 +286,17 @@ class AStarGlobalPlanner:
         """
         # For now, always use corridor path to ensure we get enough waypoints
         # This will create a smooth curved path around the door
-        return self._create_corridor_path(start, goal)
+        path = self._create_corridor_path(start, goal)
+        
+        # Additional safety check: ensure all waypoints are within bounds
+        safe_path = []
+        for i, wp in enumerate(path):
+            if wp[0] >= 0 and wp[0] <= self.corridor_length and wp[1] >= 0 and wp[1] <= self.corridor_width:
+                safe_path.append(wp)
+            else:
+                print(f"Removing out-of-bounds waypoint {i}: {wp}")
+        
+        return safe_path
         
         # Original A* logic (commented out for now)
         # # Check if door is between start and goal
