@@ -162,10 +162,10 @@ class TSDWA:
         i, j, k = 0, min(1 + 2, len(global_path) - 2), min(2 + 4, len(global_path) - 1)
         p0, p1, p2 = global_path[i], global_path[j], global_path[k]
         # shift p0 to origin
-        p1 -= p0
-        p2 -= p0
-        area2 = abs(p1[0]*p2[1] - p1[1]*p2[0])
-        denom = np.linalg.norm(p1) * np.linalg.norm(p2) * np.linalg.norm(p1 - p2) + 1e-6
+        p1_shifted = p1.copy() - p0
+        p2_shifted = p2.copy() - p0
+        area2 = abs(p1_shifted[0]*p2_shifted[1] - p1_shifted[1]*p2_shifted[0])
+        denom = np.linalg.norm(p1_shifted) * np.linalg.norm(p2_shifted) * np.linalg.norm(p1_shifted - p2_shifted) + 1e-6
         return 2 * area2 / denom
 
     def _generate_ts_samples(
