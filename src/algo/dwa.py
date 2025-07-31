@@ -148,8 +148,8 @@ class DWA:
         dw = self.dynamic_window()
         
         # Get door-aware sampling parameters
-        w_min, w_max = self.get_door_aware_sampling_params()
-        #w_min, w_max = -math.pi, math.pi
+        #w_min, w_max = self.get_door_aware_sampling_params()
+        w_min, w_max = -math.pi, math.pi
         
         # Sample velocities and evaluate
         best_score = -float('inf')
@@ -302,7 +302,7 @@ class DWA:
         
         # Update wall check points based on trajectory length and corridor width
         corridor_width = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
-        self.wall_check_points = max(1, int(len(trajectory) / (0.5 * corridor_width)))
+        self.wall_check_points = max(3, int(len(trajectory) / (0.5 * corridor_width)))
         
         # Check distance to corridor boundaries if they exist
         
