@@ -5,6 +5,7 @@ from typing import List, Tuple
 import math
 
 from sim.person import Person
+from copy import deepcopy
 
 
 class DWA:
@@ -26,15 +27,15 @@ class DWA:
         self.max_rotation = math.pi  # Max angular velocity (rad/s)
         self.max_accel = 1.0 * 4  # Max linear acceleration (m/s²)
         self.max_angular_accel = math.pi * 2  # Max angular acceleration (rad/s²)
-        self.dt = 0.1  # Time step for simulation
+        self.dt = 0.167  # Time step for simulation
         self.predict_time = 2.0  # How far ahead to predict (seconds)
         self.goal = None
         self.trajectories = []  # For visualization
         self.best_trajectory = None  # For visualization
         
         # Sample space parameters
-        self.v_samples = 12  # Number of linear velocity samples
-        self.w_samples = 12  # Number of angular velocity samples
+        self.v_samples = 8  # Number of linear velocity samples
+        self.w_samples = 8  # Number of angular velocity samples
         self.v_min = 0.0  # Minimum linear velocity
         self.v_max = max_speed  # Maximum linear velocity
         self.w_min = -math.pi  # Minimum angular velocity
@@ -44,46 +45,27 @@ class DWA:
         self.door_position = None  # Will be set when door position is known
         self.door_side = None  # Will be set when door side is known
         self.door_influence_radius = 7.5  # Distance in meters where door affects sampling
-        self.door_sampling_bias = 0.75  # How strongly to bias sampling (0-1)
+        self.door_sampling_bias = 0.8  # How strongly to bias sampling (0-1)
         
         # Scoring weights
         self.weights = {
-            'goal': 0.2,
-            'clearance': 0.7,
-            'velocity': 0.1
+            'goal': 0.6,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
+            'clearance': 0.3, # Moderate weight on clearance 
+            'velocity': 0.1,  # Lower weight on velocity
         }
         
         # Robot dynamics
         self.v = 0.0  # Current linear velocity
         self.w = 0.0  # Current angular velocity
+        
+        # Door angle in robot frame (set by robot.py)
+        self.door_angle_robot_frame = None
+
+        # Wall checking parameters
+        self.wall_check_points = 6  # Default value, will be updated dynamically
 
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
-    
-    def set_sample_space_params(self, v_samples=None, w_samples=None, 
-                              v_min=None, v_max=None, w_min=None, w_max=None):
-        """Modify the DWA sample space parameters.
-        
-        Args:
-            v_samples (int, optional): Number of linear velocity samples
-            w_samples (int, optional): Number of angular velocity samples
-            v_min (float, optional): Minimum linear velocity
-            v_max (float, optional): Maximum linear velocity
-            w_min (float, optional): Minimum angular velocity in radians
-            w_max (float, optional): Maximum angular velocity in radians
-        """
-        if v_samples is not None:
-            self.v_samples = max(2, v_samples)  # At least 2 samples
-        if w_samples is not None:
-            self.w_samples = max(2, w_samples)  # At least 2 samples
-        if v_min is not None:
-            self.v_min = max(0.0, v_min)  # Can't go backwards
-        if v_max is not None:
-            self.v_max = min(self.max_speed, v_max)  # Can't exceed max speed
-        if w_min is not None:
-            self.w_min = max(-math.pi, w_min)  # Limit to -π
-        if w_max is not None:
-            self.w_max = min(math.pi, w_max)  # Limit to π
 
     def set_door_info(self, door_position: Tuple[float, float], door_side: str):
         """Set the door position and side for door-aware sampling.
@@ -94,6 +76,10 @@ class DWA:
         """
         self.door_position = np.array(door_position)
         self.door_side = door_side
+
+    def set_door_angle_robot_frame(self, angle_rad: float):
+        """Set the door angle in robot reference frame (radians)."""
+        self.door_angle_robot_frame = angle_rad
 
     def get_door_aware_sampling_params(self):
         """Calculate sampling parameters based on proximity to door.
@@ -111,18 +97,16 @@ class DWA:
         if dist_to_door > self.door_influence_radius:
             return self.w_min, self.w_max
         
-        # Calculate door-relative angle
-        door_direction = self.door_position - self.position
-        door_angle = math.atan2(door_direction[1], door_direction[0])
-        door_angle = self.normalize_angle(door_angle - self.orientation)
+        # Use door angle in robot frame (set by robot.py)
+        if self.door_angle_robot_frame is not None:
+            door_angle = math.degrees(self.door_angle_robot_frame)
+        else:
+            # Fallback: Calculate door-relative angle
+            door_direction = self.door_position - self.position
+            door_angle_rad = math.atan2(door_direction[1], door_direction[0])
+            door_angle_rad = self.normalize_angle(door_angle_rad - self.orientation)
+            door_angle = math.degrees(door_angle_rad)
 
-        # print the door angle, orientation and door direction in degrees
-        door_angle = math.degrees(door_angle)
-        door_direction = np.array([math.cos(math.radians(door_angle)), 
-                                   math.sin(math.radians(door_angle))])
-        orientation_deg = math.degrees(self.orientation)
-        print(f"Door angle: {door_angle:.2f}°")
-        
         # Calculate influence factor (1 when at door, 0 at influence radius)
         # Use distance to door and orientation reletive to the door
         influence = (1.0 - (dist_to_door / self.door_influence_radius)) + (1 - (abs(door_angle) / 180.0))
@@ -137,8 +121,18 @@ class DWA:
             w_min = -math.pi
             #w_max = clamp(math.pi -(math.pi + math.pi/2)*influence, -math.pi, math.pi)
             #w_max = clamp(math.pi * (1 - influence) + math.radians(abs(door_angle)), -math.pi, math.pi)
-            w_max = (math.pi + math.radians(abs(door_angle))) * (1 - influence)
-            #print(f"w_min: {w_min}, w_max: {w_max}")
+            #w_max = (math.pi + math.radians(abs(door_angle))) * (1 - influence)
+            if math.radians(door_angle) > 0 and math.radians(door_angle) < math.pi:
+                #w_max = (math.pi + math.radians(door_angle)) * max(0, (1 - influence))
+                w_min = -math.pi/2
+                w_max = (math.pi + math.radians(door_angle)) * (1 - influence)
+            else:
+                w_max = math.pi
+            #w_max = (math.pi + math.radians(abs(door_angle))) * max(0, (1 - influence))
+            #w_max = math.pi * (1 - influence)
+            #print(f"influence: {influence}")
+            print(f"w_min: {w_min}, w_max: {w_max}")
+            print(f"door_angle: {door_angle}")
         else:
             # Bias towards positive angles (right turns) when door is on left
             w_min = -math.pi * (1 - influence)
@@ -155,23 +149,29 @@ class DWA:
         
         # Get door-aware sampling parameters
         w_min, w_max = self.get_door_aware_sampling_params()
+        #w_min, w_max = -math.pi, math.pi
         
         # Sample velocities and evaluate
         best_score = -float('inf')
         best_v, best_w = 0.0, 0.0
         self.trajectories = []  # Reset for visualization
         
-        # Sample linear and angular velocities using configured parameters
-        for v in np.linspace(max(dw[0], self.v_min), min(dw[1], self.v_max), num=self.v_samples):
-            # Use door-aware angular velocity limits
-            for w in np.linspace(max(dw[2], w_min), min(dw[3], w_max), num=self.w_samples):
+        # Sample velocities like in the reference implementation
+        # Create arrays of possible velocity changes (not absolute velocities)
+        v_samples = np.linspace(max(dw[0], self.v_min), min(dw[1], self.v_max), num=self.v_samples)
+        w_samples = np.linspace(max(dw[2], w_min), min(dw[3], w_max), num=self.w_samples)
+        
+        for v in v_samples:
+            for w in w_samples:
                 trajectory = self.predict_trajectory(v, w)
                 self.trajectories.append(trajectory)  # For visualization
                 
                 # Calculate scores
                 goal_score = self.goal_score(trajectory)
                 clearance_score = self.clearance_score(trajectory, people)
-                velocity_score = v / self.max_speed
+                
+                # Velocity score: prefer higher speeds but don't penalize too much for lower speeds
+                velocity_score = v / self.max_speed if v > 0 else 0
                 
                 # Total weighted score
                 total_score = (self.weights['goal'] * goal_score +
@@ -201,9 +201,9 @@ class DWA:
         return self.velocity, self.position, self.goal
     
     def dynamic_window(self):
-        # Calculate the dynamic window based on current velocities and constraints
-        vs = [0, self.max_speed,
-              -self.max_rotation, self.max_rotation]
+        # Calculate the dynamic window based on current velocities and constraints  
+        # Velocity limits
+        vs = [self.v_min, self.v_max, -self.max_rotation, self.max_rotation]
         
         # Add acceleration constraints
         vd = [
@@ -246,24 +246,15 @@ class DWA:
         final_pos = trajectory[-1]
         distance_to_goal = np.linalg.norm(self.goal - final_pos)
         
-        # Also consider alignment with goal direction
-        goal_direction = self.goal - self.position
-        if np.linalg.norm(goal_direction) > 0:
-            goal_direction = goal_direction / np.linalg.norm(goal_direction)
+        # Calculate progress towards goal (like reference implementation)
+        previous_distance = np.linalg.norm(self.goal - self.position)
+        progress = previous_distance - distance_to_goal
         
-        traj_direction = trajectory[-1] - trajectory[0]
-        if np.linalg.norm(traj_direction) > 0:
-            traj_direction = traj_direction / np.linalg.norm(traj_direction)
-        
-        alignment = np.dot(goal_direction, traj_direction)
-        
-        # Combine distance and alignment
-        max_distance = np.linalg.norm(self.goal - self.position)
-        if max_distance == 0:
+        # Normalize progress (positive for moving towards goal)
+        if previous_distance == 0:
             return 1.0
-            
-        distance_score = 1.0 - (distance_to_goal / max_distance)
-        return 0.7 * distance_score + 0.3 * alignment
+             
+        return progress / previous_distance  # Normalized progress score
     
     def clearance_score_v0(self, trajectory, people):
         if not people:
@@ -290,7 +281,11 @@ class DWA:
         """Calculate clearance score considering both people and corridor boundaries"""
         if not people and not hasattr(self, 'corridor_bounds'):
             return 1.0  # No obstacles or boundaries to consider
-            
+        #people = deepcopy(people)
+        #for person in people:
+        #    if np.linalg.norm(self.position - person.position) < 4.0:
+        #        person.position = np.array([20.0, 20.0])
+
         min_distance = float('inf')
         
         # Check distance to people
@@ -305,10 +300,15 @@ class DWA:
                     if min_distance <= 0:  # Collision
                         return -float('inf')
         
+        # Update wall check points based on trajectory length and corridor width
+        corridor_width = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
+        self.wall_check_points = max(1, int(len(trajectory) / (0.5 * corridor_width)))
+        
         # Check distance to corridor boundaries if they exist
+        
         if hasattr(self, 'corridor_bounds'):
-            bounds = self.corridor_bounds
-            for point in trajectory:
+            bounds = self.corridor_bounds  # Need to take in account the we need to extract the walls from the cost map
+            for point in trajectory[:self.wall_check_points]:  # Use dynamic parameter
                 # Distance to left wall (x_min)
                 dist_left = point[0] - bounds['x_min'] - self.radius
                 # Distance to right wall (x_max)
@@ -329,6 +329,88 @@ class DWA:
         # Normalize to [0, 1] range with 1 being safe distance
         safe_distance = 1.0  # 1 meter is considered safe
         return min(min_distance / safe_distance, 1.0)
+
+    def clearance_score_v2(self, trajectory, people):
+        """Return a clearance score that:
+        1. Considers *people* distances for grading (like clearance_score_v0).
+        2. Treats *corridor walls* as hard constraints – a trajectory that
+           intersects a wall is rejected (-inf) but proximity to the wall is
+           **not** penalised.
+
+        This lets the robot skim alongside walls when that is the safest route
+        around dynamic obstacles, while still preventing actual collisions.
+        """
+        # --- 1. collision / scoring against dynamic obstacles (people) --------
+        if not people:
+            min_dist_people = float('inf')
+        else:
+            min_dist_people = float('inf')
+            for person in people:
+                if not person.active:
+                    continue
+                for p in trajectory:
+                    dist = np.linalg.norm(p - person.position) - self.radius - person.radius
+                    if dist < min_dist_people:
+                        min_dist_people = dist
+                        if min_dist_people <= 0:  # collision -> reject
+                            return -float('inf')
+        # --- 2. hard boundary check for corridor walls -----------------------
+        if hasattr(self, 'corridor_bounds') and self.corridor_bounds is not None:
+            b = self.corridor_bounds
+            for p in trajectory:
+                if (p[0] - b['x_min'] - self.radius) <= 0:  # left wall collision
+                    return -float('inf')
+                if (b['x_max'] - p[0] - self.radius) <= 0:  # right wall collision
+                    return -float('inf')
+                if (p[1] - b['y_min'] - self.radius) <= 0:  # bottom wall
+                    return -float('inf')
+                if (b['y_max'] - p[1] - self.radius) <= 0:  # top wall
+                    return -float('inf')
+        # --- 3. convert people clearance to a [0,1] score --------------------
+        if min_dist_people == float('inf'):
+            return 1.0  # no people encountered
+        safe_distance = 1.0  # 1 m considered comfortable around people
+        return min(min_dist_people / safe_distance, 1.0)
+
+    def clearance_score_v3(self, trajectory, people):
+        """Calculate wall clearance score that penalizes proximity to walls but allows getting close.
+        
+        This method treats walls as soft constraints - the robot can get close to walls
+        but will prefer trajectories that maintain some distance from walls.
+        """
+        if not hasattr(self, 'corridor_bounds') or self.corridor_bounds is None:
+            return 1.0  # No walls to consider
+        
+        min_wall_distance = float('inf')
+        bounds = self.corridor_bounds
+        
+        # Check distance to corridor boundaries
+        for point in trajectory:
+            # Distance to left wall (x_min)
+            dist_left = point[0] - bounds['x_min'] - self.radius
+            # Distance to right wall (x_max)
+            dist_right = bounds['x_max'] - point[0] - self.radius
+            # Distance to bottom wall (y_min)
+            dist_bottom = point[1] - bounds['y_min'] - self.radius
+            # Distance to top wall (y_max)
+            dist_top = bounds['y_max'] - point[1] - self.radius
+            
+            # Find the minimum distance to any boundary
+            current_min = min(dist_left, dist_right, dist_bottom, dist_top)
+            
+            if current_min < min_wall_distance:
+                min_wall_distance = current_min
+                if min_wall_distance <= 0:  # Collision with boundary
+                    return -float('inf')
+        
+        # Convert to a score: prefer some distance from walls but don't penalize too much
+        # 0.3m is considered comfortable distance from walls
+        comfortable_distance = 0.5
+        if min_wall_distance >= comfortable_distance:
+            return 1.0  # Full score when maintaining comfortable distance
+        else:
+            # Gradual penalty as we get closer to walls
+            return min_wall_distance / comfortable_distance
     
     def normalize_angle(self, angle):
         # Normalize angle to [-π, π]

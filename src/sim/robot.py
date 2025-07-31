@@ -26,6 +26,7 @@ class Robot:
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
         self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         self.nav_type = "dwa"
+        #self.nav_type = "simple"
 
         # Learning
         self.state = None
@@ -40,6 +41,12 @@ class Robot:
         self.people = people
         if self.goal is None:
             return
+        
+        # Get door angle in robot frame and pass to DWA
+        if hasattr(self.nav, 'set_door_angle_robot_frame'):
+            nav_info = self.get_navigation_info(2)
+            self.nav.set_door_angle_robot_frame(nav_info['door_angle'])
+        
         self.velocity, self.position, self.goal = self.nav.update(dt, people)
 
         # Get state, reward and done
@@ -48,8 +55,7 @@ class Robot:
         self.reward = nav_info["closest_obstacle_distance"]
         self.done = np.linalg.norm(self.position - self.goal) < 1.0
 
-        return deepcopy(self.state), self.reward, self.done
-        
+        return deepcopy(self.state), self.reward, self.done     
 
     def get_egocentric_costmap(self, size=8.0, resolution=0.1, inflation_radius=0.2):
         """
@@ -177,6 +183,9 @@ class Robot:
             door_relative[0] * math.cos(self.nav.orientation) + door_relative[1] * math.sin(self.nav.orientation),
             -door_relative[0] * math.sin(self.nav.orientation) + door_relative[1] * math.cos(self.nav.orientation)
         ])
+
+        # Angle to door in robot frame (radians)
+        door_angle_rad = math.atan2(door_robot_frame[1], door_robot_frame[0])
         
         # Find waypoint N meters ahead along best trajectory
         waypoint_robot_frame = np.array([lookahead_distance, 0.0])  # Default straight ahead
@@ -241,6 +250,7 @@ class Robot:
         return {
             'waypoint': waypoint_robot_frame,
             'door_position': door_robot_frame,
+            'door_angle': door_angle_rad,
             'linear_velocity': linear_vel,
             'angular_velocity': angular_vel,
             'closest_obstacle_distance': min_distance
@@ -282,7 +292,7 @@ class Robot:
             costmap = self.get_egocentric_costmap(size=size, resolution=0.1)
             
             # Create a colored version of the costmap (red for obstacles)
-            colored_costmap = np.zeros((*costmap.shape, 4), dtype=np.uint8)  # Now with 4 channels (RGBA)
+            colored_costmap = np.zeros((*costmap.shape, int(size)), dtype=np.uint8)  # Now with 4 channels (RGBA)
             colored_costmap[..., 0] = costmap  # Red channel
             colored_costmap[..., 1] = 0        # Green channel
             colored_costmap[..., 2] = 0        # Blue channel
