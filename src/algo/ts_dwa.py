@@ -35,10 +35,10 @@ class TSDWA:
         radius: float,
         corridor_bounds: dict,
         *,
-        look_ahead_idx: int = 8,        # i_look in the paper
+        look_ahead_idx: int = 7,        # i_look in the paper
         n_heading: int = 7,             # n_asamp   (angular samples in polar space)
-        n_speed: int = 4,               # n_vsamp   (speed magnitude samples)
-        theta_range: float = math.pi/3,  # θ_range   (±60° cone)
+        n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
+        theta_range: float = math.pi/6,  # θ_range   (±60° cone)
         alpha_ph: float = 1.0,          # α_ph heading‑bias gain
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
@@ -151,11 +151,29 @@ class TSDWA:
     # ------------------------------------------------------------------
 
     def _extract_heading(self, global_path: List[np.ndarray]) -> float:
-        # Algorithm 1 in the paper
-        idx = min(self.look_ahead_idx, len(global_path) - 1)
-        look_pt = global_path[idx]
+        """Extract path heading by finding closest point and looking ahead."""
+        if len(global_path) < 2:
+            return 0.0
+        
+        # 1. Find the closest point on the path to robot position
+        min_dist = float('inf')
+        closest_idx = 0
+        
+        for i, path_point in enumerate(global_path):
+            dist = np.linalg.norm(path_point - self.position)
+            if dist < min_dist:
+                min_dist = dist
+                closest_idx = i
+        
+        # 2. Look ahead by look_ahead_idx steps from the closest point
+        look_ahead_idx = min(closest_idx + self.look_ahead_idx, len(global_path) - 1)
+        look_pt = global_path[look_ahead_idx]
+        
+        # 3. Calculate heading from robot to look-ahead point
         rel = look_pt - self.position
-        return math.atan2(rel[1], rel[0]) - getattr(self, "orientation", 0.0)
+        heading = math.atan2(rel[1], rel[0]) - getattr(self, "orientation", 0.0)
+        
+        return self._normalize_angle(heading)
 
     def _extract_curvature(self, global_path: List[np.ndarray]) -> float:
         # Algorithm 2 (Menger curvature) — simplified for 2D points
@@ -255,7 +273,7 @@ class TSDWA:
                     return -float("inf")
         # corridor collisions
         bounds = self.corridor_bounds
-        for p in traj[:2]:
+        for p in traj[:5]:  # TODO: update to the term for wall check points (Orientation brunch)
             dists = [
                 p[0] - bounds["x_min"] - self.radius,
                 bounds["x_max"] - p[0] - self.radius,
