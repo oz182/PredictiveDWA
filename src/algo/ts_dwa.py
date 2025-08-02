@@ -40,6 +40,7 @@ class TSDWA:
         n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
         theta_range: float = math.pi/6,  # θ_range   (±60° cone)
         alpha_ph: float = 1.0,          # α_ph heading‑bias gain
+        n_skip: int = 2,                # spacing between curvature calculation points
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
         self.position = position
@@ -60,6 +61,7 @@ class TSDWA:
         self.n_speed = n_speed
         self.theta_range = theta_range
         self.alpha_ph = alpha_ph
+        self.n_skip = n_skip
 
         # Dynamics / limits replicate original values so scoring remains valid ----
         self.max_rotation = math.pi
@@ -182,15 +184,49 @@ class TSDWA:
         return self._normalize_angle(heading)
 
     def _extract_curvature(self, global_path: List[np.ndarray]) -> float:
-        # Algorithm 2 (Menger curvature) — simplified for 2D points
-        i, j, k = 0, min(1 + 2, len(global_path) - 2), min(2 + 4, len(global_path) - 1)
-        p0, p1, p2 = global_path[i], global_path[j], global_path[k]
-        # shift p0 to origin
+        """Extract path curvature using look-ahead mechanism (consistent with heading extraction)."""
+        if len(global_path) < 3:  # need at least 3 points for curvature calculation
+            return 0.0
+        
+        # 1. Find the closest point on the path to robot position (same as heading extraction)
+        min_dist = float('inf')
+        closest_idx = 0
+        
+        for i, path_point in enumerate(global_path):
+            dist = np.linalg.norm(path_point - self.position)
+            if dist < min_dist:
+                min_dist = dist
+                closest_idx = i
+        
+        # 2. Use look-ahead mechanism to get three points for curvature calculation
+        # Point 1: look-ahead point (same as heading extraction)
+        look_ahead_idx = min(closest_idx + self.look_ahead_idx, len(global_path) - 1)
+        
+        # Point 2: further ahead for curvature calculation
+        point2_idx = min(look_ahead_idx + self.n_skip, len(global_path) - 1)
+        
+        # Point 3: even further ahead
+        point3_idx = min(point2_idx + self.n_skip, len(global_path) - 1)
+        
+        # Ensure we have at least 3 distinct points
+        if point3_idx <= look_ahead_idx:
+            return 0.0
+        
+        # 3. Calculate Menger curvature using the three look-ahead points
+        p0 = global_path[look_ahead_idx]  # First look-ahead point
+        p1 = global_path[point2_idx]      # Second point
+        p2 = global_path[point3_idx]      # Third point
+        
+        # Shift p0 to origin
         p1_shifted = p1.copy() - p0
         p2_shifted = p2.copy() - p0
-        area2 = abs(p1_shifted[0]*p2_shifted[1] - p1_shifted[1]*p2_shifted[0])
+        
+        # Calculate area of triangle formed by the three points
+        area = abs(p1_shifted[0]*p2_shifted[1] - p1_shifted[1]*p2_shifted[0]) * 0.5
+        
+        # Calculate Menger curvature: κ = 4A / (a*b*c) where A is area, a,b,c are side lengths
         denom = np.linalg.norm(p1_shifted) * np.linalg.norm(p2_shifted) * np.linalg.norm(p1_shifted - p2_shifted) + 1e-6
-        return 2 * area2 / denom
+        return 4 * area / denom
 
     def _generate_ts_samples(
         self, dw: Tuple[float, float, float, float], theta_ph: float, kappa: float
