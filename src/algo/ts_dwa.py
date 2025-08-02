@@ -35,11 +35,11 @@ class TSDWA:
         radius: float,
         corridor_bounds: dict,
         *,
-        look_ahead_idx: int = 7,        # i_look in the paper
+        look_ahead_idx: int = 6,        # i_look in the paper
         n_heading: int = 7,             # n_asamp   (angular samples in polar space)
         n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
         theta_range: float = math.pi/6,  # θ_range   (±60° cone)
-        alpha_ph: float = 1.0,          # α_ph heading‑bias gain
+        alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 2,                # spacing between curvature calculation points
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
@@ -260,8 +260,9 @@ class TSDWA:
 
         # Escape manoeuvres (left/right/back) -----------------------------
         for omega_bias in (-self.max_rotation * 0.5, self.max_rotation * 0.5):
-            samples.append((self.max_speed * 0.3, omega_bias))
-        samples.append((self.max_speed * 0.2, 0.0))  # reverse‑like slow move
+            #samples.append((self.max_speed * 0.3, omega_bias))
+            pass
+        #samples.append((self.max_speed * 0.2, 0.0))  # reverse‑like slow move
         return samples
 
     # -------  Legacy helpers copied verbatim from original planner  -----
