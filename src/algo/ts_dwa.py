@@ -81,6 +81,9 @@ class TSDWA:
         # Re‑use original scoring weights for now; user may tune externally
         self.weights = {"goal": 0.2, "clearance": 0.7, "velocity": 0.1}
 
+        # Wall checking parameters
+        self.wall_check_points = 6  # Default value, will be updated dynamically
+
     # ---------------------------------------------------------------------
     # ─── PUBLIC API (matches original DWA) ────────────────────────────────
     # ---------------------------------------------------------------------
@@ -305,6 +308,11 @@ class TSDWA:
         return 0.7 * (1 - dist_goal / dist_max) + 0.3 * alignment
 
     def _clearance_score(self, traj, people):
+
+        # Update wall check points based on trajectory length and corridor width
+        corridor_width = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
+        self.wall_check_points = max(1, int(len(traj) / (0.5 * corridor_width)))
+
         min_dist = float("inf")
         for person in people:
             if not person.active:
@@ -316,7 +324,7 @@ class TSDWA:
                     return -float("inf")
         # corridor collisions
         bounds = self.corridor_bounds
-        for p in traj[:5]:  # TODO: update to the term for wall check points (Orientation brunch)
+        for p in traj[:self.wall_check_points]:  
             dists = [
                 p[0] - bounds["x_min"] - self.radius,
                 bounds["x_max"] - p[0] - self.radius,
