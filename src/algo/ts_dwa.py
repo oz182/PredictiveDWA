@@ -49,6 +49,11 @@ class TSDWA:
         self.radius = radius
         self.corridor_bounds = corridor_bounds
 
+        if np.linalg.norm(velocity) > 1e-3:
+            self.orientation = math.atan2(velocity[1], velocity[0])
+        else:
+            self.orientation = 0.0  # Angle in radians (0 points to right)
+
         # -------  TS‑specific parameters  --------------------------------------
         self.look_ahead_idx = look_ahead_idx
         self.n_heading = n_heading
@@ -170,8 +175,9 @@ class TSDWA:
         look_pt = global_path[look_ahead_idx]
         
         # 3. Calculate heading from robot to look-ahead point
-        rel = look_pt - self.position
-        heading = math.atan2(rel[1], rel[0]) - getattr(self, "orientation", 0.0)
+        rel = look_pt - self.position  # vector from robot to look-ahead point in world coordinates
+        absulte_angle = math.atan2(rel[1], rel[0])  # angle from robot to look-ahead point in world coordinates
+        heading = absulte_angle - getattr(self, "orientation", 0.0)  # angle from robot to look-ahead point in robot coordinates
         
         return self._normalize_angle(heading)
 
