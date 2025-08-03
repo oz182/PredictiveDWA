@@ -5,6 +5,7 @@ import time
 import sys
 import os
 import random
+import threading
 
 # Add the parent directory to the path to import simulation modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -15,7 +16,7 @@ from sim.sim import Simulation
 class SimpleSimulationGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Predictive DWA Simulation (Simple)")
+        self.root.title("Predictive DWA Simulation (Embedded)")
         self.root.geometry("1200x800")
         
         # Simulation state
@@ -127,9 +128,22 @@ class SimpleSimulationGUI:
             
             widget.grid(row=row, column=1, sticky=tk.EW, padx=(0, 5), pady=2)
             
-            # Value label
-            value_label = ttk.Label(dwa_frame, textvariable=var)
+            # Create formatted display variable
+            display_var = tk.StringVar()
+            display_var.set(f"{var.get():.2f}" if isinstance(var, tk.DoubleVar) else str(var.get()))
+            
+            # Value label with formatted display
+            value_label = ttk.Label(dwa_frame, textvariable=display_var)
             value_label.grid(row=row, column=2, sticky=tk.W, pady=2)
+            
+            # Bind the original variable to update the display
+            def update_display(var=var, display_var=display_var):
+                if isinstance(var, tk.DoubleVar):
+                    display_var.set(f"{var.get():.2f}")
+                else:
+                    display_var.set(str(var.get()))
+            
+            var.trace('w', lambda *args, v=var, d=display_var: update_display(v, d))
             
             row += 1
         
@@ -181,9 +195,22 @@ class SimpleSimulationGUI:
             
             widget.grid(row=row, column=1, sticky=tk.EW, padx=(0, 5), pady=2)
             
-            # Value label
-            value_label = ttk.Label(sim_frame, textvariable=var)
+            # Create formatted display variable
+            display_var = tk.StringVar()
+            display_var.set(f"{var.get():.2f}" if isinstance(var, tk.DoubleVar) else str(var.get()))
+            
+            # Value label with formatted display
+            value_label = ttk.Label(sim_frame, textvariable=display_var)
             value_label.grid(row=row, column=2, sticky=tk.W, pady=2)
+            
+            # Bind the original variable to update the display
+            def update_display(var=var, display_var=display_var):
+                if isinstance(var, tk.DoubleVar):
+                    display_var.set(f"{var.get():.2f}")
+                else:
+                    display_var.set(str(var.get()))
+            
+            var.trace('w', lambda *args, v=var, d=display_var: update_display(v, d))
             
             row += 1
         
@@ -288,7 +315,7 @@ class SimpleSimulationGUI:
             messagebox.showerror("Error", f"Failed to apply simulation parameters: {str(e)}")
             
     def start_simulation(self):
-        """Start the simulation in a separate window"""
+        """Start the simulation in embedded mode"""
         if self.running:
             return
             
@@ -297,14 +324,19 @@ class SimpleSimulationGUI:
         self.run_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         
-        # Start simulation in main thread (this will block the GUI)
-        self.simulation_loop()
+        # Start simulation in a separate thread
+        self.simulation_thread = threading.Thread(target=self.simulation_loop, daemon=True)
+        self.simulation_thread.start()
         
     def stop_simulation(self):
         """Stop the simulation"""
         self.running = False
         self.run_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
+        
+        # Wait for thread to finish
+        if hasattr(self, 'simulation_thread') and self.simulation_thread and self.simulation_thread.is_alive():
+            self.simulation_thread.join(timeout=1.0)
         
     def restart_simulation(self):
         """Restart the simulation"""
@@ -315,25 +347,20 @@ class SimpleSimulationGUI:
         self.initialize_simulation()
         
     def simulation_loop(self):
-        """Main simulation loop running in main thread"""
+        """Main simulation loop running in separate thread"""
         try:
             print("Initializing pygame...")
-            # Initialize pygame display
+            # Initialize pygame without display
             pygame.init()
+            
+            # Create a surface for rendering
             width, height = 800, 400
-            screen = pygame.display.set_mode((width, height))
-            pygame.display.set_caption("Predictive DWA Simulation")
+            self.pygame_screen = pygame.Surface((width, height))
             clock = pygame.time.Clock()
             print("Pygame initialized successfully")
             
             while self.running:
                 dt = clock.tick(60) / 1000.0  # Delta time in seconds
-                
-                # Handle pygame events
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self.running = False
-                        break
                 
                 # Update simulation
                 if self.simulation:
@@ -349,14 +376,16 @@ class SimpleSimulationGUI:
                         self.running = False
                         break
                 
-                # Render
-                screen.fill((255, 255, 255))
+                # Render to surface
+                self.pygame_screen.fill((255, 255, 255))
                 if self.simulation:
                     try:
-                        self.simulation.draw_v0(screen)
+                        self.simulation.draw_v0(self.pygame_screen)
                     except Exception as e:
                         print(f"Rendering error: {e}")
-                pygame.display.flip()
+                
+                # Update the canvas in the main thread
+                self.root.after(0, self.update_canvas)
                 
         except Exception as e:
             print(f"Simulation loop error: {e}")
@@ -369,6 +398,34 @@ class SimpleSimulationGUI:
             
         # Update GUI state when simulation ends
         self.root.after(0, self.stop_simulation)
+    
+    def update_canvas(self):
+        """Update the tkinter canvas with the pygame surface"""
+        if not hasattr(self, 'pygame_screen') or self.pygame_screen is None:
+            return
+            
+        try:
+            # Convert pygame surface to PIL Image
+            import PIL.Image
+            import PIL.ImageTk
+            
+            # Get the pygame surface data
+            pygame_string = pygame.image.tostring(self.pygame_screen, 'RGB')
+            
+            # Create PIL Image
+            width, height = self.pygame_screen.get_size()
+            pil_image = PIL.Image.frombytes('RGB', (width, height), pygame_string)
+            
+            # Convert to PhotoImage
+            photo = PIL.ImageTk.PhotoImage(pil_image)
+            
+            # Update canvas
+            self.canvas.delete("all")
+            self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            self.canvas.image = photo  # Keep a reference
+            
+        except Exception as e:
+            print(f"Canvas update error: {e}")
             
     def on_closing(self):
         """Handle application closing"""
