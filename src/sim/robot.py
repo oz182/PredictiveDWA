@@ -24,6 +24,8 @@ class Robot:
         self.corridor_bounds = corridor_bounds
         self.door_position = door_position
         self.people = None
+        # History of robot positions for rendering traversed path
+        self.path_points: list[np.ndarray] = [self.position.copy()]
 
         # ------ Global planner (A* with door avoidance) ------
         corridor_length = self.corridor_bounds['x_max'] - self.corridor_bounds['x_min']
@@ -74,6 +76,13 @@ class Robot:
             self.velocity, self.position, self.goal = self.nav.update(dt, people, self.global_path)
         else:
             self.velocity, self.position, self.goal = self.nav.update(dt, people)
+
+        # Append current position to path history (limit length to avoid unbounded growth)
+        if not hasattr(self, 'path_points'):
+            self.path_points = []
+        self.path_points.append(self.position.copy())
+        if len(self.path_points) > 5000:
+            self.path_points = self.path_points[-5000:]
 
         # Get state, reward and done
         nav_info = self.get_navigation_info(2)
@@ -290,6 +299,11 @@ class Robot:
             end_pos = (self.position + self.velocity * 0.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
         elif self.nav_type in ("dwa", "ts_dwa"):
+            # Draw traversed path (polyline)
+            if hasattr(self, 'path_points') and len(self.path_points) > 1:
+                path_pts = [(p * scale + offset).astype(int) for p in self.path_points]
+                pygame.draw.lines(screen, (128, 0, 128), False, path_pts, 2)
+
             # Draw robot
             pos = (self.position * scale + offset).astype(int)
             pygame.draw.circle(screen, (0, 0, 255), pos, int(self.radius * scale))
