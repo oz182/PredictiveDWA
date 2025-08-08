@@ -131,8 +131,8 @@ class DWA:
             #w_max = (math.pi + math.radians(abs(door_angle))) * max(0, (1 - influence))
             #w_max = math.pi * (1 - influence)
             #print(f"influence: {influence}")
-            print(f"w_min: {w_min}, w_max: {w_max}")
-            print(f"door_angle: {door_angle}")
+            #print(f"w_min: {w_min}, w_max: {w_max}")
+            #print(f"door_angle: {door_angle}")
         else:
             # Bias towards positive angles (right turns) when door is on left
             w_min = -math.pi * (1 - influence)
@@ -148,8 +148,8 @@ class DWA:
         dw = self.dynamic_window()
         
         # Get door-aware sampling parameters
-        #w_min, w_max = self.get_door_aware_sampling_params()
-        w_min, w_max = -math.pi, math.pi
+        w_min, w_max = self.get_door_aware_sampling_params()
+        #w_min, w_max = -math.pi, math.pi
         
         # Sample velocities and evaluate
         best_score = -float('inf')
