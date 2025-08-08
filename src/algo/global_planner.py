@@ -12,7 +12,11 @@ class AStarGlobalPlanner:
 
     def __init__(self, corridor_length: float, corridor_width: float, 
                  door_position: Tuple[float, float], door_side: str,
-                 *, resolution: float = 0.25, door_halo_radius: float = 1.0):
+                 *, resolution: float = 0.15, door_halo_radius: float = 1.0,
+                 consider_doors: bool = True,
+                 door_influence_sigma_factor: float = 1.5,
+                 door_influence_peak_shift: float = 0.8,
+                 door_influence_skew: float = 0.0):
         """Parameters
         ----------
         corridor_length : float
@@ -27,6 +31,17 @@ class AStarGlobalPlanner:
             Grid resolution for A* search (m).
         door_halo_radius : float, optional
             Radius around door to treat as obstacle (m).
+        consider_doors : bool, optional
+            If False, planner will ignore doors and output a straight-line path.
+        door_influence_sigma_factor : float, optional
+            Multiplier for halo radius that sets the spread (sigma) of the
+            curved bypass. Larger makes the effect more oval/longer.
+        door_influence_peak_shift : float, optional
+            Shift (m) of the maximum offset upstream (before the door). Positive
+            values place the peak before the door to mimic earlier avoidance.
+        door_influence_skew : float, optional
+            Asymmetry of the spread: in [-0.9, 0.9]. Positive stretches the
+            approach side (before the peak) and compresses the exit side.
         """
         self.corridor_length = corridor_length
         self.corridor_width = corridor_width
@@ -34,6 +49,10 @@ class AStarGlobalPlanner:
         self.door_side = door_side
         self.resolution = max(0.05, resolution)
         self.door_halo_radius = door_halo_radius
+        self.consider_doors = consider_doors
+        self.door_influence_sigma_factor = float(door_influence_sigma_factor)
+        self.door_influence_peak_shift = float(door_influence_peak_shift)
+        self.door_influence_skew = float(max(-0.9, min(0.9, door_influence_skew)))
         
         # Grid dimensions
         self.grid_width = int(corridor_length / resolution) + 1
@@ -284,18 +303,56 @@ class AStarGlobalPlanner:
         List[np.ndarray]
             List of waypoints from start to goal.
         """
-        # For now, always use corridor path to ensure we get enough waypoints
-        # This will create a smooth curved path around the door
-        path = self._create_corridor_path(start, goal)
-        
-        # Additional safety check: ensure all waypoints are within bounds
-        safe_path = []
-        for i, wp in enumerate(path):
-            if wp[0] >= 0 and wp[0] <= self.corridor_length and wp[1] >= 0 and wp[1] <= self.corridor_width:
-                safe_path.append(wp)
+        # If doors are disabled, always return straight-line path
+        start = np.array(start, dtype=float)
+        goal = np.array(goal, dtype=float)
+        if not self.consider_doors:
+            candidate_path = self._straight_line_fallback(tuple(start), tuple(goal))
+            # Ensure bounds and return
+            safe_path: List[np.ndarray] = []
+            for wp in candidate_path:
+                if 0 <= wp[0] <= self.corridor_length and 0 <= wp[1] <= self.corridor_width:
+                    safe_path.append(wp)
+            return safe_path
+
+        # Prefer a true straight-line path when the door does not obstruct the
+        # segment from start to goal. Only deviate (use corridor path) if the
+        # door halo intersects the straight segment.
+
+        door_x = float(self.door_position[0])
+
+        # If the door lies completely before or after both start and goal in x,
+        # it cannot obstruct; use straight line.
+        if (start[0] < door_x and goal[0] < door_x) or (start[0] > door_x and goal[0] > door_x):
+            candidate_path = self._straight_line_fallback(tuple(start), tuple(goal))
+        else:
+            # Compute shortest distance from door point to the start-goal segment
+            def point_to_segment_distance(point: Tuple[float, float],
+                                          seg_a: np.ndarray,
+                                          seg_b: np.ndarray) -> float:
+                p = np.array(point, dtype=float)
+                a = np.array(seg_a, dtype=float)
+                b = np.array(seg_b, dtype=float)
+                ab = b - a
+                if np.allclose(ab, 0.0):
+                    return float(np.linalg.norm(p - a))
+                t = float(np.clip(np.dot(p - a, ab) / np.dot(ab, ab), 0.0, 1.0))
+                closest = a + t * ab
+                return float(np.linalg.norm(p - closest))
+
+            distance_to_segment = point_to_segment_distance(self.door_position, start, goal)
+            if distance_to_segment > self.door_halo_radius:
+                # Door halo does not intersect the straight segment
+                candidate_path = self._straight_line_fallback(tuple(start), tuple(goal))
             else:
-                print(f"Removing out-of-bounds waypoint {i}: {wp}")
-        
+                # Door is in the way: create a corridor-aware path that curves around it
+                candidate_path = self._create_local_bypass_path(tuple(start), tuple(goal))
+
+        # Ensure waypoints are within corridor bounds
+        safe_path: List[np.ndarray] = []
+        for wp in candidate_path:
+            if 0 <= wp[0] <= self.corridor_length and 0 <= wp[1] <= self.corridor_width:
+                safe_path.append(wp)
         return safe_path
         
         # Original A* logic (commented out for now)
@@ -385,6 +442,108 @@ class AStarGlobalPlanner:
             waypoints.append(waypoint)
         
         return waypoints
+
+    def _create_local_bypass_path(self, start: Tuple[float, float], goal: Tuple[float, float]) -> List[np.ndarray]:
+        """Create a smooth, curved local bypass around the door halo.
+
+        We generate a path that follows the straight start–goal line and adds a
+        smooth perpendicular "bump" around the door using a Gaussian profile.
+        This produces a gentle, radial-like curvature that starts before the
+        halo and returns after it, avoiding sharp corners.
+        """
+        start_np = np.array(start, dtype=float)
+        goal_np = np.array(goal, dtype=float)
+        d = goal_np - start_np
+        dist = float(np.linalg.norm(d))
+        if dist < 1e-6:
+            return [start_np, goal_np]
+
+        u = d / dist  # unit direction along straight segment
+        perp = np.array([-u[1], u[0]])  # unit perpendicular
+
+        # Door geometry relative to the line
+        door_np = np.array(self.door_position, dtype=float)
+        s0 = float(np.clip(np.dot(door_np - start_np, d) / (dist * dist), 0.0, 1.0) * dist)
+        proj = start_np + (s0 / dist) * d
+        d_perp = float(np.dot(door_np - proj, perp))  # signed perpendicular distance
+
+        # Offset direction away from the door
+        offset_dir = -perp if d_perp >= 0.0 else perp
+
+        # Ensure we clear halo by a margin at the closest approach (around s0)
+        margin = max(0.1, 0.2 * self.door_halo_radius)
+        required_clearance = float(self.door_halo_radius + margin)
+        # At s0, perpendicular separation will be |d_perp| + offset_max
+        offset_max = max(0.0, required_clearance - abs(d_perp))
+        if offset_max < 1e-3:
+            # No extra offset needed – fall back to straight line
+            return self._straight_line_fallback(start, goal)
+
+        # Width of the smooth bypass region (controls subtlety of curvature)
+        # Use sigma proportional to halo size to start turning before the door
+        # Determine peak position slightly before the door (by shift meters)
+        s_peak = max(0.0, min(dist, s0 - float(self.door_influence_peak_shift)))
+
+        # Spread using configurable sigma factor (oval stretch along the path)
+        sigma_base = float(max(self.resolution * 4.0, self.door_influence_sigma_factor * self.door_halo_radius))
+
+        # Asymmetric spread (skew): stretch approach side if positive, exit side if negative
+        sigma_before = sigma_base * (1.0 + max(0.0, self.door_influence_skew))
+        sigma_after  = sigma_base * (1.0 + max(0.0, -self.door_influence_skew))
+
+        window_half_width = float(max(2.0 * sigma_base, self.door_halo_radius + margin))
+        s_entry = max(0.0, s_peak - window_half_width)
+        s_exit = min(dist, s_peak + window_half_width)
+
+        # Sampling step for smooth curve
+        step = max(self.resolution * 0.5, 0.05)
+
+        waypoints: List[np.ndarray] = []
+
+        # Helper to append segment along straight line without offset
+        def append_straight(s_from: float, s_to: float):
+            if s_to <= s_from + 1e-6:
+                return
+            n = max(1, int((s_to - s_from) / self.resolution))
+            for i in range(n):
+                s = s_from + (i / n) * (s_to - s_from)
+                pt = start_np + u * s
+                waypoints.append(pt)
+
+        # 1) Before the bypass region
+        append_straight(0.0, s_entry)
+
+        # 2) Smooth bypass region with Gaussian perpendicular offset
+        s = s_entry
+        while s <= s_exit + 1e-9:
+            # Asymmetric Gaussian centered at s_peak with different sigmas before/after
+            if s <= s_peak:
+                sigma = sigma_before
+            else:
+                sigma = sigma_after
+            offset = offset_max * math.exp(-0.5 * ((s - s_peak) / max(1e-6, sigma)) ** 2)
+            pt = start_np + u * s + offset_dir * offset
+            waypoints.append(pt)
+            s += step
+
+        # 3) After the bypass region
+        append_straight(s_exit, dist)
+
+        # Ensure exact start and goal are included
+        if len(waypoints) == 0 or np.linalg.norm(waypoints[0] - start_np) > 1e-6:
+            waypoints.insert(0, start_np)
+        if np.linalg.norm(waypoints[-1] - goal_np) > 1e-6:
+            waypoints.append(goal_np)
+
+        # Bound to corridor
+        bounded: List[np.ndarray] = []
+        for wp in waypoints:
+            bounded_wp = np.array([
+                np.clip(wp[0], 0.0, self.corridor_length),
+                np.clip(wp[1], 0.0, self.corridor_width)
+            ])
+            bounded.append(bounded_wp)
+        return bounded
 
 
 # Keep the old class for backward compatibility

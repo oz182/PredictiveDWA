@@ -44,7 +44,8 @@ class Robot:
             door_pos, 
             door_side,
             resolution=0.25,
-            door_halo_radius=1.0  # 1 meter radius around door
+            door_halo_radius=1.5,  # 1 meter radius around door
+            consider_doors=True   # Force straight-line until door handling is desired
         )
         self.global_path = None  # will be initialised after goal is set
 
