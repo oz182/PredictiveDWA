@@ -30,6 +30,7 @@ def main(render=False):
     )
 
     running = True
+    completed = False
     while running:
         #dt = clock.tick(60) / 1000.0  # Delta time in seconds
         if render:
@@ -53,8 +54,36 @@ def main(render=False):
             pygame.display.flip()
 
         # Optionally stop headless simulation after some condition
-        if done:  # You can define `done()` in your Simulation
+        if done:
+            completed = True
             running = False
+
+    # If rendering, wait for a key press before closing
+    if render:
+        # Draw completion message overlay once more
+        try:
+            msg = "Simulation complete. Press any key to exit."
+            font = pygame.font.SysFont(None, 28)
+            text_surface = font.render(msg, True, (0, 0, 0))
+            # Draw semi-transparent banner at bottom
+            banner_h = 40
+            banner = pygame.Surface((width, banner_h))
+            banner.set_alpha(180)
+            banner.fill((240, 240, 240))
+            screen.blit(banner, (0, height - banner_h))
+            screen.blit(text_surface, ((width - text_surface.get_width()) // 2, height - banner_h + (banner_h - text_surface.get_height()) // 2))
+            pygame.display.flip()
+        except Exception:
+            pass
+
+        waiting = True
+        while waiting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    waiting = False
+                elif event.type == pygame.KEYDOWN:
+                    waiting = False
+            pygame.time.wait(50)
 
     pygame.quit()
 
