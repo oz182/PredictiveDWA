@@ -35,11 +35,11 @@ class TSDWA:
         radius: float,
         corridor_bounds: dict,
         *,
-        look_ahead_idx: int = 6,        # i_look in the paper
-        n_heading: int = 7,             # n_asamp   (angular samples in polar space)
-        n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
-        theta_range: float = math.pi/8,  # θ_range   (±60° cone)
-        alpha_ph: float = 1.0,          # α_ph heading‑bias gain
+        look_ahead_idx: int = 4,        # i_look in the paper
+        n_heading: int = 5,             # n_asamp   (angular samples in polar space)
+        n_speed: int = 12,               # n_vsamp   (speed magnitude samples)
+        theta_range: float = math.pi/9,  # θ_range   (±30° cone)
+        alpha_ph: float = 4.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
@@ -79,7 +79,7 @@ class TSDWA:
         self.w = 0.0
 
         # Re‑use original scoring weights for now; user may tune externally
-        self.weights = {"goal": 0.2, "clearance": 0.7, "velocity": 0.1}
+        self.weights = {"goal": 0.4, "clearance": 0.5, "velocity": 0.1}
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
@@ -259,7 +259,7 @@ class TSDWA:
                 samples.append((v_trans, omega))
 
                 # Add zero‑omega version (straight motion) for exit corridors
-                samples.append((v_trans, 0.0))
+                #samples.append((v_trans, 0.0))
 
         # Escape manoeuvres (left/right/back) -----------------------------
         for omega_bias in (-self.max_rotation * 0.5, self.max_rotation * 0.5):
