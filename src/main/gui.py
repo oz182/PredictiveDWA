@@ -46,6 +46,9 @@ class EmbeddedSimulationGUI:
         # Control buttons
         self.create_control_buttons(left_panel)
         
+        # Robot Parameters
+        self.create_robot_parameters(left_panel)
+        
         # DWA Parameters
         self.create_dwa_parameters(left_panel)
         
@@ -76,17 +79,83 @@ class EmbeddedSimulationGUI:
         self.restart_button = ttk.Button(button_frame, text="Restart", command=self.restart_simulation)
         self.restart_button.pack(side=tk.LEFT)
         
+    def create_robot_parameters(self, parent):
+        # Robot Parameters section
+        robot_frame = ttk.LabelFrame(parent, text="Robot Parameters", padding=10)
+        robot_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Robot parameter variables
+        self.robot_params = {
+            'max_speed': tk.DoubleVar(value=2.0),
+            'max_rotation': tk.DoubleVar(value=3.14159),  # π
+            'max_accel': tk.DoubleVar(value=4.0),
+            'max_angular_accel': tk.DoubleVar(value=6.28318),  # 2π
+        }
+        
+        # Robot parameter units mapping
+        self.robot_param_units = {
+            'max_speed': 'm/s',
+            'max_rotation': 'rad/s',
+            'max_accel': 'm/s²',
+            'max_angular_accel': 'rad/s²',
+        }
+        
+        # Create parameter controls
+        row = 0
+        for param_name, var in self.robot_params.items():
+            # Convert parameter name to display name with units
+            display_name = param_name.replace('_', ' ').title()
+            unit = self.robot_param_units.get(param_name, '')
+            label_text = f"{display_name} ({unit}):" if unit else f"{display_name}:"
+            
+            # Label
+            label = ttk.Label(robot_frame, text=label_text)
+            label.grid(row=row, column=0, sticky=tk.W, padx=(0, 5), pady=2)
+            
+            # Use Scale for all robot parameters
+            if param_name == 'max_speed':
+                widget = ttk.Scale(robot_frame, from_=0.5, to=5.0, variable=var, orient=tk.HORIZONTAL)
+            elif param_name == 'max_rotation':
+                widget = ttk.Scale(robot_frame, from_=1.0, to=6.0, variable=var, orient=tk.HORIZONTAL)
+            elif param_name == 'max_accel':
+                widget = ttk.Scale(robot_frame, from_=1.0, to=10.0, variable=var, orient=tk.HORIZONTAL)
+            elif param_name == 'max_angular_accel':
+                widget = ttk.Scale(robot_frame, from_=2.0, to=12.0, variable=var, orient=tk.HORIZONTAL)
+            else:
+                widget = ttk.Scale(robot_frame, from_=0.1, to=10.0, variable=var, orient=tk.HORIZONTAL)
+            
+            widget.grid(row=row, column=1, sticky=tk.EW, padx=(0, 5), pady=2)
+            
+            # Create formatted display variable
+            display_var = tk.StringVar()
+            display_var.set(f"{var.get():.2f}")
+            
+            # Value label with formatted display
+            value_label = ttk.Label(robot_frame, textvariable=display_var)
+            value_label.grid(row=row, column=2, sticky=tk.W, pady=2)
+            
+            # Bind the original variable to update the display
+            def update_display(var=var, display_var=display_var):
+                display_var.set(f"{var.get():.2f}")
+            
+            var.trace('w', lambda *args, v=var, d=display_var: update_display(v, d))
+            
+            row += 1
+        
+        # Apply button
+        apply_button = ttk.Button(robot_frame, text="Apply Robot Parameters", command=self.apply_dwa_parameters)
+        apply_button.grid(row=row, column=0, columnspan=3, pady=(10, 0))
+        
+        # Configure grid weights
+        robot_frame.columnconfigure(1, weight=1)
+        
     def create_dwa_parameters(self, parent):
         # DWA Parameters section
         dwa_frame = ttk.LabelFrame(parent, text="DWA Parameters", padding=10)
         dwa_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Parameter variables
+        # Parameter variables (only DWA-specific parameters)
         self.dwa_params = {
-            'max_speed': tk.DoubleVar(value=2.0),
-            'max_rotation': tk.DoubleVar(value=3.14159),  # π
-            'max_accel': tk.DoubleVar(value=4.0),
-            'max_angular_accel': tk.DoubleVar(value=6.28318),  # 2π
             'predict_time': tk.DoubleVar(value=2.0),
             'v_samples': tk.IntVar(value=8),
             'w_samples': tk.IntVar(value=8),
@@ -95,14 +164,26 @@ class EmbeddedSimulationGUI:
             'velocity_weight': tk.DoubleVar(value=0.1)
         }
         
+        # Parameter units mapping
+        self.dwa_param_units = {
+            'predict_time': 's',
+            'v_samples': 'samples',
+            'w_samples': 'samples',
+            'goal_weight': '',
+            'clearance_weight': '',
+            'velocity_weight': ''
+        }
+        
         # Create parameter controls
         row = 0
         for param_name, var in self.dwa_params.items():
-            # Convert parameter name to display name
+            # Convert parameter name to display name with units
             display_name = param_name.replace('_', ' ').title()
+            unit = self.dwa_param_units.get(param_name, '')
+            label_text = f"{display_name} ({unit}):" if unit else f"{display_name}:"
             
             # Label
-            label = ttk.Label(dwa_frame, text=f"{display_name}:")
+            label = ttk.Label(dwa_frame, text=label_text)
             label.grid(row=row, column=0, sticky=tk.W, padx=(0, 5), pady=2)
             
             # Entry/Scale based on parameter type
@@ -111,15 +192,7 @@ class EmbeddedSimulationGUI:
                 widget = ttk.Spinbox(dwa_frame, from_=1, to=20, textvariable=var, width=10)
             else:
                 # Use Scale for doubles with appropriate ranges
-                if param_name == 'max_speed':
-                    widget = ttk.Scale(dwa_frame, from_=0.5, to=5.0, variable=var, orient=tk.HORIZONTAL)
-                elif param_name == 'max_rotation':
-                    widget = ttk.Scale(dwa_frame, from_=1.0, to=6.0, variable=var, orient=tk.HORIZONTAL)
-                elif param_name == 'max_accel':
-                    widget = ttk.Scale(dwa_frame, from_=1.0, to=10.0, variable=var, orient=tk.HORIZONTAL)
-                elif param_name == 'max_angular_accel':
-                    widget = ttk.Scale(dwa_frame, from_=2.0, to=12.0, variable=var, orient=tk.HORIZONTAL)
-                elif param_name == 'predict_time':
+                if param_name == 'predict_time':
                     widget = ttk.Scale(dwa_frame, from_=0.5, to=5.0, variable=var, orient=tk.HORIZONTAL)
                 elif param_name in ['goal_weight', 'clearance_weight', 'velocity_weight']:
                     widget = ttk.Scale(dwa_frame, from_=0.0, to=1.0, variable=var, orient=tk.HORIZONTAL)
@@ -167,14 +240,24 @@ class EmbeddedSimulationGUI:
             'door_side': tk.StringVar(value="right")
         }
         
+        # Parameter units mapping
+        self.sim_param_units = {
+            'corridor_width': 'm',
+            'num_people': '',
+            'spawn_interval': 's',
+            'door_side': ''  # No unit for door side
+        }
+        
         # Create parameter controls
         row = 0
         for param_name, var in self.sim_params.items():
-            # Convert parameter name to display name
+            # Convert parameter name to display name with units
             display_name = param_name.replace('_', ' ').title()
+            unit = self.sim_param_units.get(param_name, '')
+            label_text = f"{display_name} ({unit}):" if unit else f"{display_name}:"
             
             # Label
-            label = ttk.Label(sim_frame, text=f"{display_name}:")
+            label = ttk.Label(sim_frame, text=label_text)
             label.grid(row=row, column=0, sticky=tk.W, padx=(0, 5), pady=2)
             
             # Widget based on parameter type
@@ -264,18 +347,21 @@ class EmbeddedSimulationGUI:
             messagebox.showerror("Error", f"Failed to initialize simulation: {str(e)}")
             
     def apply_dwa_parameters(self):
-        """Apply DWA parameters to the current simulation"""
+        """Apply both robot and DWA parameters to the current simulation"""
         if self.simulation is None or not hasattr(self.simulation.robot, 'nav'):
             return
             
         try:
             nav = self.simulation.robot.nav
             
-            # Apply basic parameters
-            nav.max_speed = self.dwa_params['max_speed'].get()
-            nav.max_rotation = self.dwa_params['max_rotation'].get()
-            nav.max_accel = self.dwa_params['max_accel'].get()
-            nav.max_angular_accel = self.dwa_params['max_angular_accel'].get()
+            # Apply robot parameters
+            if hasattr(self, 'robot_params'):
+                nav.max_speed = self.robot_params['max_speed'].get()
+                nav.max_rotation = self.robot_params['max_rotation'].get()
+                nav.max_accel = self.robot_params['max_accel'].get()
+                nav.max_angular_accel = self.robot_params['max_angular_accel'].get()
+            
+            # Apply DWA parameters
             nav.predict_time = self.dwa_params['predict_time'].get()
             nav.v_samples = self.dwa_params['v_samples'].get()
             nav.w_samples = self.dwa_params['w_samples'].get()
@@ -288,7 +374,7 @@ class EmbeddedSimulationGUI:
             # Note: safe_distance is hardcoded in clearance_score methods
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to apply DWA parameters: {str(e)}")
+            messagebox.showerror("Error", f"Failed to apply parameters: {str(e)}")
             
     def apply_simulation_parameters(self):
         """Apply simulation parameters and restart if running"""
