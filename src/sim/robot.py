@@ -21,6 +21,8 @@ class Robot:
         self.corridor_bounds = corridor_bounds
         self.door_position = door_position
         self.people = None
+        # History of robot positions for rendering traversed path
+        self.path_points = [self.position.copy()]
 
 
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
@@ -48,6 +50,13 @@ class Robot:
             self.nav.set_door_angle_robot_frame(nav_info['door_angle'])
         
         self.velocity, self.position, self.goal = self.nav.update(dt, people)
+
+        # Append current position to path history (limit length to avoid unbounded growth)
+        if not hasattr(self, 'path_points'):
+            self.path_points = []
+        self.path_points.append(self.position.copy())
+        if len(self.path_points) > 5000:
+            self.path_points = self.path_points[-5000:]
 
         # Get state, reward and done
         nav_info = self.get_navigation_info(2)
@@ -257,6 +266,11 @@ class Robot:
         }
     
     def draw(self, screen, scale, offset):
+        # Draw traversed path (polyline)
+        if hasattr(self, 'path_points') and len(self.path_points) > 1:
+            path_pts = [(p * scale + offset).astype(int) for p in self.path_points]
+            pygame.draw.lines(screen, (128, 0, 128), False, path_pts, 2)
+
         if self.nav_type == "simple":
             pos = (self.position * scale + offset).astype(int)
             pygame.draw.circle(screen, (0, 0, 255), pos, int(self.radius * scale))
