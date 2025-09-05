@@ -19,7 +19,7 @@ class Robot:
         self.position = np.array(position, dtype=float)
         self.radius = radius
         self.velocity = np.array([0.0, 0.0])
-        self.max_speed = 2.0
+        self.max_speed = 1.2
         self.goal = None
         self.corridor_bounds = corridor_bounds
         self.door_position = door_position

@@ -13,7 +13,7 @@ class Simulation:
         self.corridor_width = corridor_width
         self.door_side = door_side
         self.num_people = num_people
-        self.people_speeds = people_speeds if people_speeds else [random.uniform(1.0, 1.5) for _ in range(num_people)]
+        self.people_speeds = people_speeds if people_speeds else [random.uniform(0.6, 1.2) for _ in range(num_people)]
         
         # Corridor dimensions
         self.corridor_length = 20.0
