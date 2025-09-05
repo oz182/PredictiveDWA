@@ -54,6 +54,8 @@ class Simulation:
         self.goal_reached_time = None
         self.total_distance_traveled = 0.0
         self.previous_position = None
+        self.collision_count = 0
+        self.collision_history = []  # Track collision timestamps and details
 
     def get_door_position(self) -> Tuple[float, float]:
         """Returns the precise (x,y) world coordinates of the door"""
@@ -113,8 +115,9 @@ class Simulation:
         # Remove inactive people
         self.people = [p for p in self.people if p.active]
         
-        # Record data if enabled
+        # Check for collisions and record data if enabled
         if self.data_recording_enabled:
+            self._check_collisions()
             self._record_simulation_data(dt, done)
 
         return state, reward, done
@@ -190,6 +193,47 @@ class Simulation:
             text_surface = font.render(text, True, (0, 0, 0))
             screen.blit(text_surface, (10, 10 + i * 25))
     
+    def _check_collisions(self):
+        """Check for collisions between robot and people"""
+        robot_pos = self.robot.position
+        robot_radius = self.robot.radius
+        
+        for person in self.people:
+            if not person.active:
+                continue
+                
+            person_pos = person.position
+            person_radius = person.radius
+            
+            # Calculate distance between centers
+            distance = np.linalg.norm(robot_pos - person_pos)
+            
+            # Check if collision occurs (distance < sum of radii)
+            if distance < (robot_radius + person_radius):
+                # Check if this is a new collision (not already recorded)
+                collision_id = f"robot_person_{id(person)}"
+                
+                # Only count if this collision hasn't been recorded recently
+                # (to avoid counting the same collision multiple times)
+                recent_collision = any(
+                    abs(coll['timestamp'] - datetime.now().timestamp()) < 0.1  # Within 0.1 seconds
+                    for coll in self.collision_history
+                    if coll.get('collision_id') == collision_id
+                )
+                
+                if not recent_collision:
+                    self.collision_count += 1
+                    collision_info = {
+                        'collision_id': collision_id,
+                        'timestamp': datetime.now().timestamp(),
+                        'robot_position': robot_pos.copy(),
+                        'person_position': person_pos.copy(),
+                        'distance': distance,
+                        'collision_count': self.collision_count
+                    }
+                    self.collision_history.append(collision_info)
+                    print(f"Collision detected! Total collisions: {self.collision_count}")
+    
     def _record_simulation_data(self, dt: float, done: bool):
         """Record simulation data for each time step"""
         current_time = datetime.now()
@@ -219,6 +263,7 @@ class Simulation:
             'total_distance_traveled': self.total_distance_traveled,
             'goal_reached': done,
             'num_people': len(self.people),
+            'collision_count': self.collision_count,
             'dt': dt
         }
         
@@ -255,6 +300,7 @@ class Simulation:
             'average_velocity': avg_velocity,
             'total_distance_traveled': final_distance,
             'goal_reached': self.goal_reached_time is not None,
+            'total_collisions': self.collision_count,
             'total_data_points': len(self.simulation_data)
         }
     
@@ -301,6 +347,7 @@ class Simulation:
                 print(f"  Time to reach goal: {summary['time_to_reach_goal']:.2f} seconds" if summary['time_to_reach_goal'] else "  Goal not reached")
                 print(f"  Average velocity: {summary['average_velocity']:.2f} m/s")
                 print(f"  Total distance traveled: {summary['total_distance_traveled']:.2f} meters")
+                print(f"  Total collisions: {summary['total_collisions']}")
                 print(f"  Goal reached: {'Yes' if summary['goal_reached'] else 'No'}")
                 print(f"  Total data points: {summary['total_data_points']}")
             
@@ -317,3 +364,5 @@ class Simulation:
         self.goal_reached_time = None
         self.total_distance_traveled = 0.0
         self.previous_position = None
+        self.collision_count = 0
+        self.collision_history = []
