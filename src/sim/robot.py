@@ -8,7 +8,10 @@ from copy import deepcopy, copy
 from sim.person import Person
 from algo.simple import Simple
 from algo.dwa import DWA
-
+from algo.ts_dwa import TSDWA
+from algo.ts_dwa_Try import TSDWA_2
+from algo.global_planner import StraightLineGlobalPlanner
+from algo.global_planner import AStarGlobalPlanner
 
 
 class Robot:
@@ -16,19 +19,43 @@ class Robot:
         self.position = np.array(position, dtype=float)
         self.radius = radius
         self.velocity = np.array([0.0, 0.0])
-        self.max_speed = 2.0
+        self.max_speed = 1.2
         self.goal = None
         self.corridor_bounds = corridor_bounds
         self.door_position = door_position
         self.people = None
         # History of robot positions for rendering traversed path
-        self.path_points = [self.position.copy()]
+        self.path_points: list[np.ndarray] = [self.position.copy()]
 
+        # ------ Global planner (A* with door avoidance) ------
+        corridor_length = self.corridor_bounds['x_max'] - self.corridor_bounds['x_min']
+        corridor_width  = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
+
+        # Get door information from simulation
+        door_pos = self.door_position
+        # Determine door side based on door position
+        door_side = "right"  # Default
+        if door_pos[1] < corridor_width / 2:
+            door_side = "left"
+
+        self.global_planner = AStarGlobalPlanner(
+            corridor_length, 
+            corridor_width, 
+            door_pos, 
+            door_side,
+            resolution=0.25,
+            door_halo_radius=1.5,  # 1 meter radius around door
+            consider_doors=True   # Force straight-line until door handling is desired
+        )
+        self.global_path = None  # will be initialised after goal is set
 
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
-        self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
-        self.nav_type = "dwa"
-        #self.nav_type = "simple"
+        #self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        #self.nav = TSDWA_2(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        
+        #self.nav_type = "dwa"
+        self.nav_type = "ts_dwa"
 
         # Learning
         self.state = None
@@ -38,18 +65,18 @@ class Robot:
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
         self.nav.set_goal(goal)
+        # Compute (or recompute) global path whenever a new goal is set
+        self.global_path = self.global_planner.plan(tuple(self.position), tuple(goal))
     
     def update(self, dt: float, people: List[Person]):
         self.people = people
         if self.goal is None:
             return
-        
-        # Get door angle in robot frame and pass to DWA
-        if hasattr(self.nav, 'set_door_angle_robot_frame'):
-            nav_info = self.get_navigation_info(2)
-            self.nav.set_door_angle_robot_frame(nav_info['door_angle'])
-        
-        self.velocity, self.position, self.goal = self.nav.update(dt, people)
+        # Pass global path to TS-DWA; other planners ignore the extra arg
+        if self.nav_type == "ts_dwa":
+            self.velocity, self.position, self.goal = self.nav.update(dt, people, self.global_path)
+        else:
+            self.velocity, self.position, self.goal = self.nav.update(dt, people)
 
         # Append current position to path history (limit length to avoid unbounded growth)
         if not hasattr(self, 'path_points'):
@@ -66,7 +93,7 @@ class Robot:
 
         return deepcopy(self.state), self.reward, self.done     
 
-    def get_egocentric_costmap(self, size=8.0, resolution=0.1, inflation_radius=0.2):
+    def get_egocentric_costmap(self, size=4.0, resolution=0.1, inflation_radius=0.2):
         """
         Generate an egocentric costmap centered on the robot.
         
@@ -266,18 +293,18 @@ class Robot:
         }
     
     def draw(self, screen, scale, offset):
-        # Draw traversed path (polyline)
-        if hasattr(self, 'path_points') and len(self.path_points) > 1:
-            path_pts = [(p * scale + offset).astype(int) for p in self.path_points]
-            pygame.draw.lines(screen, (128, 0, 128), False, path_pts, 2)
-
         if self.nav_type == "simple":
             pos = (self.position * scale + offset).astype(int)
             pygame.draw.circle(screen, (0, 0, 255), pos, int(self.radius * scale))
             # Draw direction indicator
             end_pos = (self.position + self.velocity * 0.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
-        elif self.nav_type == "dwa":
+        elif self.nav_type in ("dwa", "ts_dwa"):
+            # Draw traversed path (polyline)
+            if hasattr(self, 'path_points') and len(self.path_points) > 1:
+                path_pts = [(p * scale + offset).astype(int) for p in self.path_points]
+                pygame.draw.lines(screen, (128, 0, 128), False, path_pts, 2)
+
             # Draw robot
             pos = (self.position * scale + offset).astype(int)
             pygame.draw.circle(screen, (0, 0, 255), pos, int(self.radius * scale))
@@ -288,6 +315,21 @@ class Robot:
                 math.sin(self.nav.orientation)
             ]) * self.radius * 1.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
+            
+            # Draw global path as green line
+            if self.global_path is not None and len(self.global_path) > 1:
+                global_path_points = [(p * scale + offset).astype(int) for p in self.global_path]
+                pygame.draw.lines(screen, (0, 255, 0), False, global_path_points, 3)  # Green, thick line
+                
+                # Draw waypoints along the global path
+                for i, waypoint in enumerate(self.global_path):
+                    wp_pos = (waypoint * scale + offset).astype(int)
+                    if i == 0:  # Start point
+                        pygame.draw.circle(screen, (0, 255, 0), wp_pos, 5)  # Green circle
+                    elif i == len(self.global_path) - 1:  # End point
+                        pygame.draw.circle(screen, (255, 0, 0), wp_pos, 5)  # Red circle
+                    else:  # Intermediate waypoints
+                        pygame.draw.circle(screen, (0, 200, 0), wp_pos, 3)  # Darker green
             
             # Draw all sampled trajectories (faint)
             for traj in self.nav.trajectories:
