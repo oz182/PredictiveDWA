@@ -80,3 +80,6 @@ logs/
 # Temporary Python files
 *.pyo
 *.pyd
+
+# Simulation outputs
+simulation_data/

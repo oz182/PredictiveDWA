@@ -55,6 +55,9 @@ class EmbeddedSimulationGUI:
         # Simulation Parameters
         self.create_simulation_parameters(left_panel)
         
+        # Data Recording Parameters
+        self.create_data_recording_parameters(left_panel)
+        
         # Simulation display
         self.create_simulation_display(right_panel)
         
@@ -77,7 +80,11 @@ class EmbeddedSimulationGUI:
         
         # Restart button
         self.restart_button = ttk.Button(button_frame, text="Restart", command=self.restart_simulation)
-        self.restart_button.pack(side=tk.LEFT)
+        self.restart_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Export data button
+        self.export_button = ttk.Button(button_frame, text="Export Data", command=self.export_simulation_data)
+        self.export_button.pack(side=tk.LEFT)
         
     def create_robot_parameters(self, parent):
         # Robot Parameters section
@@ -304,6 +311,38 @@ class EmbeddedSimulationGUI:
         # Configure grid weights
         sim_frame.columnconfigure(1, weight=1)
         
+    def create_data_recording_parameters(self, parent):
+        # Data Recording Parameters section
+        data_frame = ttk.LabelFrame(parent, text="Data Recording", padding=10)
+        data_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Data recording variables
+        self.data_params = {
+            'recording_enabled': tk.BooleanVar(value=True),
+            'auto_export': tk.BooleanVar(value=True)
+        }
+        
+        # Recording enabled checkbox
+        recording_check = ttk.Checkbutton(data_frame, text="Enable Data Recording", 
+                                        variable=self.data_params['recording_enabled'],
+                                        command=self.toggle_data_recording)
+        recording_check.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
+        
+        # Auto export checkbox
+        auto_export_check = ttk.Checkbutton(data_frame, text="Auto Export on Completion", 
+                                         variable=self.data_params['auto_export'])
+        auto_export_check.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=2)
+        
+        # Export button
+        export_button = ttk.Button(data_frame, text="Export Current Data", 
+                                  command=self.export_simulation_data)
+        export_button.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        
+        # Reset data button
+        reset_button = ttk.Button(data_frame, text="Reset Data", 
+                                 command=self.reset_simulation_data)
+        reset_button.grid(row=3, column=0, columnspan=2, pady=2)
+        
     def create_simulation_display(self, parent):
         # Simulation display section
         display_frame = ttk.LabelFrame(parent, text="Simulation Display", padding=10)
@@ -343,6 +382,10 @@ class EmbeddedSimulationGUI:
                 people_speeds=people_speeds
             )
             self.apply_dwa_parameters()  # Apply initial DWA parameters
+            
+            # Set initial data recording state
+            if hasattr(self, 'data_params'):
+                self.simulation.enable_data_recording(self.data_params['recording_enabled'].get())
         except Exception as e:
             messagebox.showerror("Error", f"Failed to initialize simulation: {str(e)}")
             
@@ -399,6 +442,30 @@ class EmbeddedSimulationGUI:
                 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to apply simulation parameters: {str(e)}")
+    
+    def toggle_data_recording(self):
+        """Toggle data recording on/off"""
+        if self.simulation:
+            enabled = self.data_params['recording_enabled'].get()
+            self.simulation.enable_data_recording(enabled)
+            print(f"Data recording {'enabled' if enabled else 'disabled'}")
+    
+    def export_simulation_data(self):
+        """Export simulation data to CSV"""
+        if self.simulation and self.simulation.data_recording_enabled:
+            filepath = self.simulation.export_data_to_csv()
+            if filepath:
+                messagebox.showinfo("Export Complete", f"Data exported to:\n{filepath}")
+            else:
+                messagebox.showwarning("Export Failed", "No data to export or export failed")
+        else:
+            messagebox.showwarning("Export Failed", "Data recording is disabled or no simulation running")
+    
+    def reset_simulation_data(self):
+        """Reset simulation data"""
+        if self.simulation:
+            self.simulation.reset_data_recording()
+            messagebox.showinfo("Data Reset", "Simulation data has been reset")
             
     def start_simulation(self):
         """Start the simulation in embedded mode"""
@@ -456,6 +523,10 @@ class EmbeddedSimulationGUI:
                         # Check if simulation is done
                         if done:
                             self.running = False
+                            # Export data when simulation completes if auto-export is enabled
+                            if (self.simulation and self.simulation.data_recording_enabled and 
+                                hasattr(self, 'data_params') and self.data_params['auto_export'].get()):
+                                self.simulation.export_data_to_csv()
                             break
                     except Exception as e:
                         print(f"Simulation step error: {e}")
