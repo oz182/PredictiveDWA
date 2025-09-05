@@ -91,12 +91,12 @@ class EmbeddedSimulationGUI:
         robot_frame = ttk.LabelFrame(parent, text="Robot Parameters", padding=10)
         robot_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Robot parameter variables
+        # Robot parameter variables (matching run.py defaults)
         self.robot_params = {
-            'max_speed': tk.DoubleVar(value=2.0),
-            'max_rotation': tk.DoubleVar(value=3.14159),  # π
-            'max_accel': tk.DoubleVar(value=4.0),
-            'max_angular_accel': tk.DoubleVar(value=6.28318),  # 2π
+            'max_speed': tk.DoubleVar(value=1.2),  # Match robot.py default
+            'max_rotation': tk.DoubleVar(value=3.14159),  # π (match robot.py)
+            'max_accel': tk.DoubleVar(value=4.0),  # Match ts_dwa.py default
+            'max_angular_accel': tk.DoubleVar(value=6.28318),  # 2π (match ts_dwa.py)
         }
         
         # Robot parameter units mapping
@@ -161,14 +161,14 @@ class EmbeddedSimulationGUI:
         dwa_frame = ttk.LabelFrame(parent, text="DWA Parameters", padding=10)
         dwa_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Parameter variables (only DWA-specific parameters)
+        # Parameter variables (matching TS-DWA defaults from run.py)
         self.dwa_params = {
-            'predict_time': tk.DoubleVar(value=2.0),
-            'v_samples': tk.IntVar(value=8),
-            'w_samples': tk.IntVar(value=8),
-            'goal_weight': tk.DoubleVar(value=0.6),
-            'clearance_weight': tk.DoubleVar(value=0.3),
-            'velocity_weight': tk.DoubleVar(value=0.1)
+            'predict_time': tk.DoubleVar(value=2.0),  # Match ts_dwa.py default
+            'v_samples': tk.IntVar(value=8),  # Default sampling
+            'w_samples': tk.IntVar(value=8),  # Default sampling
+            'goal_weight': tk.DoubleVar(value=0.1),  # Match ts_dwa.py weights
+            'clearance_weight': tk.DoubleVar(value=0.8),  # Match ts_dwa.py weights
+            'velocity_weight': tk.DoubleVar(value=0.8)  # Match ts_dwa.py weights
         }
         
         # Parameter units mapping
@@ -372,8 +372,8 @@ class EmbeddedSimulationGUI:
                 door_side = "right"
                 num_people = 3
             
-            # Generate random speeds for people
-            people_speeds = [random.uniform(1.0, 1.5) for _ in range(num_people)]
+            # Generate random speeds for people (matching run.py range)
+            people_speeds = [random.uniform(0.6, 1.2) for _ in range(num_people)]
             
             self.simulation = Simulation(
                 corridor_width=corridor_width,
