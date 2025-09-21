@@ -36,9 +36,9 @@ class TSDWA:
         corridor_bounds: dict,
         *,
         look_ahead_idx: int = 6,        # i_look in the paper
-        n_heading: int = 5,             # n_asamp   (angular samples in polar space)
-        n_speed: int = 5,               # n_vsamp   (speed magnitude samples)
-        theta_range: float = math.pi/6,  # θ_range   (±30° cone)
+        n_heading: int = 9,             # n_asamp   (angular samples in polar space)
+        n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
+        theta_range: float = math.pi/3,  # θ_range   (±30° cone)
         alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
     ) -> None:
@@ -79,7 +79,7 @@ class TSDWA:
         self.w = 0.0
 
         # Re‑use original scoring weights for now; user may tune externally
-        self.weights = {"goal": 0.1, "clearance": 0.8, "velocity": 0.8}
+        self.weights = {"goal": 0.1, "clearance": 0.8, "velocity": 0.1}
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
