@@ -49,13 +49,18 @@ class Robot:
         )
         self.global_path = None  # will be initialised after goal is set
 
+        # ------ Choosing the local planner type ------
+    
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
         #self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         #self.nav = TSDWA_2(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
-        
+
+
         #self.nav_type = "dwa"
         self.nav_type = "ts_dwa"
+        
+        # ------ Choosing the local planner type ------
 
         # Learning
         self.state = None

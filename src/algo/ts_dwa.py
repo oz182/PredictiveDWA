@@ -322,9 +322,10 @@ class TSDWA:
                 min_dist = min(min_dist, d)
                 if min_dist <= 0:
                     return -float("inf")
-        # corridor collisions
+
+        # corridor collisions - check the closest points to the corridor boundaries
         bounds = self.corridor_bounds
-        for p in traj[:self.wall_check_points]:  
+        for p in traj[:self.wall_check_points]:  # Based on the trajectory length and corridor width (self.wall_check_points is a dynamic parameter)
             dists = [
                 p[0] - bounds["x_min"] - self.radius,
                 bounds["x_max"] - p[0] - self.radius,
