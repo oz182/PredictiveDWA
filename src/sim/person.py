@@ -28,20 +28,65 @@ class Person:
         self.turn_angle = 0
         self.turn_dist = random.uniform(self.corridor_width / 3, self.corridor_width * (2/3))
         
-    def update(self, dt: float):
+    def update(self, dt: float, people: List["Person"] = None, robot=None, corridor_bounds: dict = None):
         if not self.active:
             return
-            
+
+        # ------- Minimal avoidance steering (optional) -------
+        avoidance = np.zeros(2, dtype=float)
+        if people is not None:
+            for other in people:
+                if other is self or not other.active:
+                    continue
+                diff = self.position - other.position
+                dist = np.linalg.norm(diff)
+                if dist <= 1e-6:
+                    continue
+                # Exponential falloff radial repulsion
+                overlap = (self.radius + other.radius) - dist
+                if overlap > -0.5:  # within sensible influence range
+                    dir_vec = diff / dist
+                    strength = np.exp(-(dist - (self.radius + other.radius)) / 0.3)
+                    avoidance += dir_vec * strength * 0.3  # scale small for stability
+        if robot is not None:
+            diff = self.position - robot.position
+            dist = np.linalg.norm(diff)
+            if dist > 1e-6:
+                dir_vec = diff / dist
+                strength = np.exp(-(dist - (self.radius + getattr(robot, 'radius', 0.2))) / 0.4)
+                avoidance += dir_vec * strength * 2.0
+        if corridor_bounds is not None:
+            # Soft pushes from walls if too close
+            x, y = self.position
+            # Bottom (y_min)
+            d = y - corridor_bounds['y_min'] - self.radius
+            if d < 0.4:
+                avoidance += np.array([0.0, 1.0]) * np.exp(-(d) / 0.2) * 0.1
+            # Top (y_max)
+            d = corridor_bounds['y_max'] - y - self.radius
+            if d < 0.4:
+                avoidance += np.array([0.0, -1.0]) * np.exp(-(d) / 0.2) * 0.1
+            # Left (x_min)
+            d = x - corridor_bounds['x_min'] - self.radius
+            if d < 0.4:
+                avoidance += np.array([1.0, 0.0]) * np.exp(-(d) / 0.2) * 0.1
+            # Right (x_max)
+            d = corridor_bounds['x_max'] - x - self.radius
+            if d < 0.4:
+                avoidance += np.array([-1.0, 0.0]) * np.exp(-(d) / 0.2) * 0.1
+
         if self.state == "entering":
             # Move straight into the corridor
             if self.door_side == "right":
-                self.position[1] -= self.speed * dt  # Move down (into corridor)
+                step = np.array([0.0, -self.speed]) * dt
+                self.position += step + avoidance * dt
                 # Check if reached midline
                 if self.position[1] <= self.corridor_width - self.turn_dist: #self.corridor_width / 2:
                     self.state = "turning"
                     self.turn_angle = random.choice([math.pi, 0])  # 90° left or right
             else:  # left side
-                self.position[1] += self.speed * dt  # Move up (into corridor)
+                step = np.array([0.0, self.speed]) * dt
+                self.position += step + avoidance * dt
                 # Check if reached midline
                 if self.position[1] >= self.turn_dist: #self.corridor_width / 2:
                     self.state = "turning"
@@ -54,7 +99,14 @@ class Person:
             
         elif self.state == "moving":
             # Move in chosen direction
-            movement = self.direction * self.speed * dt
+            base = self.direction * self.speed
+            # Project avoidance to be orthogonal-biased to base to avoid oscillations
+            if np.linalg.norm(base) > 0:
+                dir_unit = base / np.linalg.norm(base)
+                lateral = avoidance - dir_unit * np.dot(avoidance, dir_unit)
+            else:
+                lateral = avoidance
+            movement = (base + lateral) * dt
             self.position += movement
             self.travel_distance += np.linalg.norm(movement)
             

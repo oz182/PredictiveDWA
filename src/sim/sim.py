@@ -110,7 +110,7 @@ class Simulation:
         # Update agents
         state, reward, done = self.robot.update(dt, self.people)
         for person in self.people:
-            person.update(dt)
+            person.update(dt, self.people, self.robot, self.corridor_bounds)
         
         # Remove inactive people
         self.people = [p for p in self.people if p.active]
