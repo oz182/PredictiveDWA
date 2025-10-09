@@ -1,0 +1,30 @@
+{
+  "agent": {
+    "learning_rate": 0.0001,
+    "gamma": 0.99,
+    "tau": 0.005,
+    "hidden_dim": 256,
+    "latent_dim": 128,
+    "use_double_dqn": false,
+    "use_dueling": false,
+    "grad_clip": 10.0
+  },
+  "training": {
+    "max_episodes": 500,
+    "max_steps_per_episode": 1000,
+    "batch_size": 64,
+    "learning_starts": 1000,
+    "update_frequency": 1,
+    "updates_per_step": 1,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.01,
+    "epsilon_decay_steps": 10000,
+    "eval_frequency": 10,
+    "eval_episodes": 5,
+    "save_frequency": 50,
+    "log_frequency": 1,
+    "checkpoint_dir": "checkpoints",
+    "log_dir": "logs"
+  },
+  "seed": 42
+}
