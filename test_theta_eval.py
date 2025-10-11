@@ -6,6 +6,7 @@ import random
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 from sim.sim import Simulation
@@ -24,7 +25,7 @@ def extract_nav_features(sim) -> np.ndarray:
     return np.asarray(feat, dtype=np.float32)
 
 
-def load_model(model_path: str, device: str = 'cpu') -> ThetaQNet:
+def load_model(model_path, device='cpu'):
     input_dim = 8
     num_actions = 4  # must match training script
     net = ThetaQNet(input_dim, num_actions)
@@ -34,7 +35,33 @@ def load_model(model_path: str, device: str = 'cpu') -> ThetaQNet:
     return net
 
 
-def main(render: bool = False, model_path: str = 'checkpoints/theta_qnet.pt', episodes: int = 3):
+def plot_and_print_theta_actions(theta_vals):
+    """Plot and then print the selected theta_range values over time (degrees)."""
+    steps = list(range(1, len(theta_vals) + 1))
+    degrees = []
+    for v in theta_vals:
+        try:
+            degrees.append(math.degrees(float(v)))
+        except Exception:
+            degrees.append(float('nan'))
+
+    # Plot
+    plt.figure(figsize=(8, 3))
+    plt.plot(steps, degrees, marker='o', linewidth=1)
+    plt.title('theta_range over time (deg)')
+    plt.xlabel('step')
+    plt.ylabel('degrees')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    # Print
+    print("theta_actions over time (deg):")
+    for i, deg in zip(steps, degrees):
+        print(f"  step {i}: {deg:.1f}")
+
+
+def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3):
     random.seed(123)
     np.random.seed(123)
     torch.manual_seed(123)
@@ -66,8 +93,8 @@ def main(render: bool = False, model_path: str = 'checkpoints/theta_qnet.pt', ep
         # Warm-up step to init internal state
         _, _, _ = sim.step(1/60.0)
 
-        total_reward = 0.0
         max_steps = 800
+        theta_history = []
         for t in range(max_steps):
             dt = (clock.tick(60) / 1000.0) if render else (1 / 60.0)
 
@@ -90,6 +117,9 @@ def main(render: bool = False, model_path: str = 'checkpoints/theta_qnet.pt', ep
             if hasattr(sim.robot, 'nav') and hasattr(sim.robot.nav, 'theta_range'):
                 sim.robot.nav.theta_range = theta_val
 
+            # Log chosen theta for this step
+            theta_history.append(theta_val)
+
             # Step simulation
             _, _, done = sim.step(dt)
 
@@ -104,6 +134,7 @@ def main(render: bool = False, model_path: str = 'checkpoints/theta_qnet.pt', ep
                 break
 
         print(f"Episode {ep+1}/{episodes} finished in {t+1} steps")
+        plot_and_print_theta_actions(theta_history)
 
     if render:
         import pygame
