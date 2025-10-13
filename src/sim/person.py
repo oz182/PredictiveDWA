@@ -153,16 +153,17 @@ class Person:
         """Render the person and, when moving, a short heading arrow."""
         pos = (self.position * scale + offset).astype(int)
         color = (255, 0, 0) if self.state == "entering" else (200, 50, 50)  # Red when entering, darker when moving
-        # Draw proxemic ellipse (visual inflation area)
-        a_pix = max(int(self.proxemic_axes[0] * scale), 1)
-        b_pix = max(int(self.proxemic_axes[1] * scale), 1)
-        halo_surface = pygame.Surface((2 * a_pix, 2 * b_pix), pygame.SRCALPHA)
-        pygame.draw.ellipse(halo_surface, self.proxemic_color, halo_surface.get_rect())
-        angle_deg = -math.degrees(self.heading_angle)
-        if abs(angle_deg) > 1e-2:
-            halo_surface = pygame.transform.rotate(halo_surface, angle_deg)
-        halo_rect = halo_surface.get_rect(center=(pos[0], pos[1]))
-        screen.blit(halo_surface, halo_rect)
+
+        #### Draw proxemic ellipse (visual inflation area - out of the costmap square) ####
+        # a_pix = max(int(self.proxemic_axes[0] * scale), 1)
+        # b_pix = max(int(self.proxemic_axes[1] * scale), 1)
+        # halo_surface = pygame.Surface((2 * a_pix, 2 * b_pix), pygame.SRCALPHA)
+        # pygame.draw.ellipse(halo_surface, self.proxemic_color, halo_surface.get_rect())
+        # angle_deg = -math.degrees(self.heading_angle)
+        # if abs(angle_deg) > 1e-2:
+        #     halo_surface = pygame.transform.rotate(halo_surface, angle_deg)
+        # halo_rect = halo_surface.get_rect(center=(pos[0], pos[1]))
+        # screen.blit(halo_surface, halo_rect)
 
         pygame.draw.circle(screen, color, pos, int(self.radius * scale))
         
