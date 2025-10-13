@@ -37,7 +37,6 @@ class Simulation:
             self.robot.nav.set_door_info(self.get_door_position(), self.door_side)
         
         self.people: List[Person] = []
-        self.person_proxemic_scale = np.array([1.6, 1.1], dtype=float)
         self.spawn_timer = 1.0
         self.spawn_interval = 1.0  # Spawn a person every second
         
@@ -94,7 +93,6 @@ class Simulation:
             
         speed = self.people_speeds[len(self.people)]
         person = Person((door_x, door_y), 0.3, speed, self.door_side, self.corridor_width, self.corridor_length)
-        person.proxemic_axes = person.radius * self.person_proxemic_scale
         self.people.append(person)
     
     def step(self, dt: float):
