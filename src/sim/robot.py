@@ -302,7 +302,12 @@ class Robot:
 
                     # Keep only the inward-facing half using dot(n_robot, v_robot) > 0
                     if dist <= door_inflation_radius and (n_robot[0] * v_robot_x + n_robot[1] * v_robot_y) > 0.0:
-                        cost = int(255 * (1 - min(dist / door_inflation_radius, 1.0)))
+                        # Softer, less aggressive falloff that preserves higher intensity at the edge
+                        t = min(max(dist / door_inflation_radius, 0.0), 1.0)
+                        edge_intensity_ratio = 0.3  # Intensity at the boundary (0..1)
+                        decay = (1.0 - t) ** 0.5      # Non-linear decay for smoother gradient
+                        cost_ratio = edge_intensity_ratio + decay * (1.0 - edge_intensity_ratio)
+                        cost = int(255 * cost_ratio)
                         costmap[ny, nx] = max(costmap[ny, nx], cost)
         
         return costmap
