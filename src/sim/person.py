@@ -44,7 +44,7 @@ class Person:
         self.turn_dist = random.uniform(self.corridor_width / 3, self.corridor_width * (2/3))
 
         # Proxemic footprint (semi-major/minor axes in meters)
-        self.proxemic_axes = np.array([radius * 1.6, radius * 1.1], dtype=float)
+        self.proxemic_axes = np.array([radius * 1.5, radius * 0.5], dtype=float)
         self.proxemic_color = (255, 150, 150, 90)  # RGBA for translucent halo
         self.heading_angle = -math.pi / 2 if self.door_side == "right" else math.pi / 2
         
