@@ -48,7 +48,7 @@ class Robot:
             door_pos, 
             door_side,
             resolution=0.25,
-            door_halo_radius=1.5,  # 1 meter radius around door
+            door_halo_radius=1.8,  # 1 meter radius around door
             consider_doors=False   # Force straight-line until door handling is desired
         )
         self.global_path = None  # will be initialised after goal is set
@@ -245,6 +245,64 @@ class Robot:
 
                     if clearance <= inflation_radius:
                         cost = int(255 * (1 - min(max(clearance, 0.0) / inflation_radius, 1.0)))
+                        costmap[ny, nx] = max(costmap[ny, nx], cost)
+
+        # Add door semicircular inflation to costmap (visible only in costmap)
+        if hasattr(self, 'door_position') and hasattr(self, 'corridor_bounds'):
+            # Door position in world coordinates
+            door_world = np.array(self.door_position, dtype=float)
+
+            # Convert door position to robot frame (continuous)
+            translated = door_world - self.position
+            door_rotated = np.array([
+                -translated[0] * np.sin(robot_angle) + translated[1] * np.cos(robot_angle),
+                translated[0] * np.cos(robot_angle) + translated[1] * np.sin(robot_angle)
+            ])
+
+            # Determine door side relative to corridor centerline
+            bounds = self.corridor_bounds
+            corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
+            door_side = "left" if door_world[1] < corridor_mid_y else "right"
+
+            # Inward normal of the wall in WORLD frame (points into corridor)
+            # Left wall (y near 0): +Y points inward; Right wall (y near max): -Y points inward
+            n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
+
+            # Rotate inward normal into ROBOT frame
+            n_robot = np.array([
+                -n_world[0] * np.sin(robot_angle) + n_world[1] * np.cos(robot_angle),
+                n_world[0] * np.cos(robot_angle) + n_world[1] * np.sin(robot_angle)
+            ])
+            norm_n = np.linalg.norm(n_robot)
+            if norm_n > 1e-9:
+                n_robot = n_robot / norm_n
+
+            # Inflation radius for the door halo (meters)
+            door_inflation_radius = float(getattr(self.global_planner, 'door_halo_radius', 1.0))
+            cells_extent = int(math.ceil(door_inflation_radius / resolution))
+
+            # Door center in grid coordinates
+            door_grid_x = int(round(door_rotated[0] / resolution + center_pixel))
+            door_grid_y = int(round(door_rotated[1] / resolution + center_pixel))
+
+            nx_min = max(0, door_grid_x - cells_extent)
+            nx_max = min(grid_size - 1, door_grid_x + cells_extent)
+            ny_min = max(0, door_grid_y - cells_extent)
+            ny_max = min(grid_size - 1, door_grid_y + cells_extent)
+
+            # Iterate cells around the door; inflate only the inward-facing half (semicircle)
+            for nx in range(nx_min, nx_max + 1):
+                cell_x = (nx - center_pixel) * resolution
+                for ny in range(ny_min, ny_max + 1):
+                    cell_y = (ny - center_pixel) * resolution
+
+                    v_robot_x = cell_x - door_rotated[0]
+                    v_robot_y = cell_y - door_rotated[1]
+                    dist = math.hypot(v_robot_x, v_robot_y)
+
+                    # Keep only the inward-facing half using dot(n_robot, v_robot) > 0
+                    if dist <= door_inflation_radius and (n_robot[0] * v_robot_x + n_robot[1] * v_robot_y) > 0.0:
+                        cost = int(255 * (1 - min(dist / door_inflation_radius, 1.0)))
                         costmap[ny, nx] = max(costmap[ny, nx], cost)
         
         return costmap
