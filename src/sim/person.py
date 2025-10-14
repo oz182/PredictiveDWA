@@ -42,6 +42,11 @@ class Person:
         self.max_distance = random.uniform(3.0, 4.0)  # Distance before disappearing
         self.turn_angle = 0
         self.turn_dist = random.uniform(self.corridor_width / 3, self.corridor_width * (2/3))
+
+        # Proxemic footprint (semi-major/minor axes in meters)
+        self.proxemic_axes = np.array([radius * 1.5, radius * 0.5], dtype=float)
+        self.proxemic_color = (255, 150, 150, 90)  # RGBA for translucent halo
+        self.heading_angle = -math.pi / 2 if self.door_side == "right" else math.pi / 2
         
     def update(self, dt: float, people: List["Person"] = None, robot=None, corridor_bounds: dict = None):
         """
@@ -114,11 +119,12 @@ class Person:
                 if self.position[1] >= self.turn_dist: #self.corridor_width / 2:
                     self.state = "turning"
                     self.turn_angle = random.choice([math.pi/2, -math.pi/2])  # 90° left or right
-                    
+
         elif self.state == "turning":
             # Immediately set new direction (no smooth turning)
             self.direction = np.array([math.cos(self.turn_angle), math.sin(self.turn_angle)])
             self.state = "moving"
+            self.heading_angle = math.atan2(self.direction[1], self.direction[0])
             
         elif self.state == "moving":
             # Move in chosen direction with lateral-only avoidance to reduce oscillations
@@ -132,6 +138,8 @@ class Person:
             movement = (base + lateral) * dt
             self.position += movement
             self.travel_distance += np.linalg.norm(movement)
+            if self.direction is not None:
+                self.heading_angle = math.atan2(self.direction[1], self.direction[0])
             
             # Deactivate if gone far enough or left corridor
             if (self.travel_distance >= self.max_distance or
@@ -145,6 +153,18 @@ class Person:
         """Render the person and, when moving, a short heading arrow."""
         pos = (self.position * scale + offset).astype(int)
         color = (255, 0, 0) if self.state == "entering" else (200, 50, 50)  # Red when entering, darker when moving
+
+        #### Draw proxemic ellipse (visual inflation area - out of the costmap square) ####
+        # a_pix = max(int(self.proxemic_axes[0] * scale), 1)
+        # b_pix = max(int(self.proxemic_axes[1] * scale), 1)
+        # halo_surface = pygame.Surface((2 * a_pix, 2 * b_pix), pygame.SRCALPHA)
+        # pygame.draw.ellipse(halo_surface, self.proxemic_color, halo_surface.get_rect())
+        # angle_deg = -math.degrees(self.heading_angle)
+        # if abs(angle_deg) > 1e-2:
+        #     halo_surface = pygame.transform.rotate(halo_surface, angle_deg)
+        # halo_rect = halo_surface.get_rect(center=(pos[0], pos[1]))
+        # screen.blit(halo_surface, halo_rect)
+
         pygame.draw.circle(screen, color, pos, int(self.radius * scale))
         
         # Draw direction arrow if moving

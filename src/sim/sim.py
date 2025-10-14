@@ -29,7 +29,7 @@ class Simulation:
         }
         
         # Initialize agents
-        self.robot = Robot((0.5, corridor_width/1.15), 0.2, self.corridor_bounds, self.get_door_position())
+        self.robot = Robot((0.5, corridor_width/1.25), 0.2, self.corridor_bounds, self.get_door_position())
         self.robot.set_goal((self.corridor_length - 1.0, corridor_width/1.2))
         
         # Set door information for DWA
@@ -92,7 +92,8 @@ class Simulation:
             door_y = 0.5
             
         speed = self.people_speeds[len(self.people)]
-        self.people.append(Person((door_x, door_y), 0.3, speed, self.door_side, self.corridor_width, self.corridor_length))
+        person = Person((door_x, door_y), 0.3, speed, self.door_side, self.corridor_width, self.corridor_length)
+        self.people.append(person)
     
     def step(self, dt: float):
         # Initialize start time on first step

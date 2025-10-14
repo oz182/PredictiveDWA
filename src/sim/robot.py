@@ -27,6 +27,10 @@ class Robot:
         # History of robot positions for rendering traversed path
         self.path_points: list[np.ndarray] = [self.position.copy()]
 
+        # Visual proxemic footprint (semi-major/minor axes in meters)
+        self.proxemic_axes = np.array([radius * 1.8, radius * 1.2], dtype=float)
+        self.proxemic_color = (150, 150, 255, 80)
+
         # ------ Global planner (A* with door avoidance) ------
         corridor_length = self.corridor_bounds['x_max'] - self.corridor_bounds['x_min']
         corridor_width  = self.corridor_bounds['y_max'] - self.corridor_bounds['y_min']
@@ -44,7 +48,7 @@ class Robot:
             door_pos, 
             door_side,
             resolution=0.25,
-            door_halo_radius=1.5,  # 1 meter radius around door
+            door_halo_radius=1.8,  # 1 meter radius around door
             consider_doors=False   # Force straight-line until door handling is desired
         )
         self.global_path = None  # will be initialised after goal is set
@@ -176,25 +180,144 @@ class Robot:
         for person in self.people:
             if not person.active:
                 continue
-                
-            # Get person position in robot-centric coordinates
-            grid_x, grid_y = world_to_robot(person.position)
+
+            # Person position in robot-centric coordinates (float precision)
+            translated = person.position - self.position
+            rotated = np.array([
+                -translated[0] * np.sin(robot_angle) + translated[1] * np.cos(robot_angle),
+                translated[0] * np.cos(robot_angle) + translated[1] * np.sin(robot_angle)
+            ])
+            person_grid = rotated / resolution + center_pixel
+            grid_x = int(round(person_grid[0]))
+            grid_y = int(round(person_grid[1]))
+
+            # Skip if completely outside
+            if grid_x < 0 or grid_x >= grid_size or grid_y < 0 or grid_y >= grid_size:
+                continue
+
+            axes = getattr(person, 'proxemic_axes', np.array([person.radius, person.radius], dtype=float)).astype(float)
+            a = max(float(axes[0]), 1e-4)
+            b = max(float(axes[1]), 1e-4)
             
-            # Only process if within costmap bounds
-            if 0 <= grid_x < grid_size and 0 <= grid_y < grid_size:
-                # Calculate combined radius
-                total_radius = person.radius + self.radius + inflation_radius
-                
-                # Inflate the person's position
-                for dx in range(-int(total_radius/resolution), int(total_radius/resolution)+1):
-                    for dy in range(-int(total_radius/resolution), int(total_radius/resolution)+1):
-                        nx, ny = grid_x + dx, grid_y + dy
-                        if 0 <= nx < grid_size and 0 <= ny < grid_size:
-                            # Distance from person center
-                            obstacle_dist = np.sqrt(dx**2 + dy**2) * resolution - person.radius - self.radius
-                            if obstacle_dist <= inflation_radius:
-                                cost = int(255 * (1 - min(max(obstacle_dist, 0) / inflation_radius, 1)))
-                                costmap[ny, nx] = max(costmap[ny, nx], cost)
+            # Offset ratio: 0.0 = person at center, 0.5 = person at rear edge
+            ellipse_offset_ratio = 0.3  # Person is 30% back from center
+            ellipse_offset = b * ellipse_offset_ratio  # Offset along major axis (forward direction)
+
+            heading_world = getattr(person, 'heading_angle', 0.0)
+            ellipse_angle = heading_world - robot_angle
+            cos_t = math.cos(ellipse_angle)
+            sin_t = math.sin(ellipse_angle)
+
+            extent = max(a, b) + self.radius + inflation_radius
+            cells_extent = int(math.ceil(extent / resolution))
+
+            nx_min = max(0, grid_x - cells_extent)
+            nx_max = min(grid_size - 1, grid_x + cells_extent)
+            ny_min = max(0, grid_y - cells_extent)
+            ny_max = min(grid_size - 1, grid_y + cells_extent)
+
+            if nx_min > nx_max or ny_min > ny_max:
+                continue
+
+            for nx in range(nx_min, nx_max + 1):
+                cell_x = (nx - center_pixel) * resolution
+                for ny in range(ny_min, ny_max + 1):
+                    cell_y = (ny - center_pixel) * resolution
+
+                    rel_x = cell_x - rotated[0]
+                    rel_y = cell_y - rotated[1]
+
+                    # Rotate into ellipse-aligned frame
+                    local_x = rel_x * cos_t - rel_y * sin_t
+                    local_y = rel_x * sin_t + rel_y * cos_t
+                    
+                    # Apply offset so person is toward the rear of the ellipse
+                    local_x_shifted = local_x + ellipse_offset
+
+                    norm = math.sqrt((local_x_shifted / b) ** 2 + (local_y / a) ** 2)
+
+                    if norm > 1e-6:
+                        scale = 1.0 / norm
+                        boundary_x_shifted = local_x_shifted * scale
+                        boundary_y = local_y * scale
+                        # Convert boundary back to unshifted frame for distance calculation
+                        boundary_x = boundary_x_shifted - ellipse_offset
+                        diff_x = local_x - boundary_x
+                        diff_y = local_y - boundary_y
+                        dist_to_boundary = math.hypot(diff_x, diff_y)
+                        if norm < 1.0:
+                            dist_to_boundary = -dist_to_boundary
+                    else:
+                        dist_to_boundary = -min(a, b)
+
+                    clearance = dist_to_boundary - self.radius
+
+                    if clearance <= inflation_radius:
+                        cost = int(255 * (1 - min(max(clearance, 0.0) / inflation_radius, 1.0)))
+                        costmap[ny, nx] = max(costmap[ny, nx], cost)
+
+        # Add door semicircular inflation to costmap (visible only in costmap)
+        if hasattr(self, 'door_position') and hasattr(self, 'corridor_bounds'):
+            # Door position in world coordinates
+            door_world = np.array(self.door_position, dtype=float)
+
+            # Convert door position to robot frame (continuous)
+            translated = door_world - self.position
+            door_rotated = np.array([
+                -translated[0] * np.sin(robot_angle) + translated[1] * np.cos(robot_angle),
+                translated[0] * np.cos(robot_angle) + translated[1] * np.sin(robot_angle)
+            ])
+
+            # Determine door side relative to corridor centerline
+            bounds = self.corridor_bounds
+            corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
+            door_side = "left" if door_world[1] < corridor_mid_y else "right"
+
+            # Inward normal of the wall in WORLD frame (points into corridor)
+            # Left wall (y near 0): +Y points inward; Right wall (y near max): -Y points inward
+            n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
+
+            # Rotate inward normal into ROBOT frame
+            n_robot = np.array([
+                -n_world[0] * np.sin(robot_angle) + n_world[1] * np.cos(robot_angle),
+                n_world[0] * np.cos(robot_angle) + n_world[1] * np.sin(robot_angle)
+            ])
+            norm_n = np.linalg.norm(n_robot)
+            if norm_n > 1e-9:
+                n_robot = n_robot / norm_n
+
+            # Inflation radius for the door halo (meters)
+            door_inflation_radius = float(getattr(self.global_planner, 'door_halo_radius', 1.0))
+            cells_extent = int(math.ceil(door_inflation_radius / resolution))
+
+            # Door center in grid coordinates
+            door_grid_x = int(round(door_rotated[0] / resolution + center_pixel))
+            door_grid_y = int(round(door_rotated[1] / resolution + center_pixel))
+
+            nx_min = max(0, door_grid_x - cells_extent)
+            nx_max = min(grid_size - 1, door_grid_x + cells_extent)
+            ny_min = max(0, door_grid_y - cells_extent)
+            ny_max = min(grid_size - 1, door_grid_y + cells_extent)
+
+            # Iterate cells around the door; inflate only the inward-facing half (semicircle)
+            for nx in range(nx_min, nx_max + 1):
+                cell_x = (nx - center_pixel) * resolution
+                for ny in range(ny_min, ny_max + 1):
+                    cell_y = (ny - center_pixel) * resolution
+
+                    v_robot_x = cell_x - door_rotated[0]
+                    v_robot_y = cell_y - door_rotated[1]
+                    dist = math.hypot(v_robot_x, v_robot_y)
+
+                    # Keep only the inward-facing half using dot(n_robot, v_robot) > 0
+                    if dist <= door_inflation_radius and (n_robot[0] * v_robot_x + n_robot[1] * v_robot_y) > 0.0:
+                        # Softer, less aggressive falloff that preserves higher intensity at the edge
+                        t = min(max(dist / door_inflation_radius, 0.0), 1.0)
+                        edge_intensity_ratio = 0.3  # Intensity at the boundary (0..1)
+                        decay = (1.0 - t) ** 0.5      # Non-linear decay for smoother gradient
+                        cost_ratio = edge_intensity_ratio + decay * (1.0 - edge_intensity_ratio)
+                        cost = int(255 * cost_ratio)
+                        costmap[ny, nx] = max(costmap[ny, nx], cost)
         
         return costmap
 
@@ -312,6 +435,18 @@ class Robot:
 
             # Draw robot
             pos = (self.position * scale + offset).astype(int)
+            proxemic_axes = getattr(self, 'proxemic_axes', np.array([self.radius * 1.8, self.radius * 1.2], dtype=float))
+            proxemic_color = getattr(self, 'proxemic_color', (150, 150, 255, 80))
+            a_pix = max(int(proxemic_axes[0] * scale), 1)
+            b_pix = max(int(proxemic_axes[1] * scale), 1)
+            halo_surface = pygame.Surface((2 * a_pix, 2 * b_pix), pygame.SRCALPHA)
+            pygame.draw.ellipse(halo_surface, proxemic_color, halo_surface.get_rect())
+            angle_deg = -math.degrees(self.nav.orientation)
+            if abs(angle_deg) > 1e-2:
+                halo_surface = pygame.transform.rotate(halo_surface, angle_deg)
+            halo_rect = halo_surface.get_rect(center=tuple(pos))
+            screen.blit(halo_surface, halo_rect)
+
             pygame.draw.circle(screen, (0, 0, 255), pos, int(self.radius * scale))
             
             # Draw orientation
