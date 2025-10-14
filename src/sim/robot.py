@@ -224,10 +224,10 @@ class Robot:
                     rel_y = cell_y - rotated[1]
 
                     # Rotate into ellipse-aligned frame
-                    local_x = rel_x * cos_t + rel_y * sin_t
-                    local_y = -rel_x * sin_t + rel_y * cos_t
+                    local_x = rel_x * cos_t - rel_y * sin_t
+                    local_y = rel_x * sin_t + rel_y * cos_t
 
-                    norm = math.sqrt((local_x / a) ** 2 + (local_y / b) ** 2)
+                    norm = math.sqrt((local_x / b) ** 2 + (local_y / a) ** 2)
 
                     if norm > 1e-6:
                         scale = 1.0 / norm
