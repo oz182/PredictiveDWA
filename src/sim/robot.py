@@ -198,6 +198,10 @@ class Robot:
             axes = getattr(person, 'proxemic_axes', np.array([person.radius, person.radius], dtype=float)).astype(float)
             a = max(float(axes[0]), 1e-4)
             b = max(float(axes[1]), 1e-4)
+            
+            # Offset ratio: 0.0 = person at center, 0.5 = person at rear edge
+            ellipse_offset_ratio = 0.3  # Person is 30% back from center
+            ellipse_offset = b * ellipse_offset_ratio  # Offset along major axis (forward direction)
 
             heading_world = getattr(person, 'heading_angle', 0.0)
             ellipse_angle = heading_world - robot_angle
@@ -226,13 +230,18 @@ class Robot:
                     # Rotate into ellipse-aligned frame
                     local_x = rel_x * cos_t - rel_y * sin_t
                     local_y = rel_x * sin_t + rel_y * cos_t
+                    
+                    # Apply offset so person is toward the rear of the ellipse
+                    local_x_shifted = local_x + ellipse_offset
 
-                    norm = math.sqrt((local_x / b) ** 2 + (local_y / a) ** 2)
+                    norm = math.sqrt((local_x_shifted / b) ** 2 + (local_y / a) ** 2)
 
                     if norm > 1e-6:
                         scale = 1.0 / norm
-                        boundary_x = local_x * scale
+                        boundary_x_shifted = local_x_shifted * scale
                         boundary_y = local_y * scale
+                        # Convert boundary back to unshifted frame for distance calculation
+                        boundary_x = boundary_x_shifted - ellipse_offset
                         diff_x = local_x - boundary_x
                         diff_y = local_y - boundary_y
                         dist_to_boundary = math.hypot(diff_x, diff_y)
