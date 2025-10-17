@@ -191,7 +191,7 @@ def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
     # If a collision occurred in this step (heuristic: last history item within ~0.2s)
     if sim.collision_history:
         if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -5.0
+            reward += -5.5
 
     # goal bonus
     if dist < 1.0:
