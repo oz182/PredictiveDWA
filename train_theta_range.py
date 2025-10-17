@@ -165,7 +165,7 @@ def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
     overlap_type = overlap_info['overlap_type']
     if overlap_type == 'none':
         # Positive reward for staying in free space
-        reward += 0.1
+        reward += 0.2
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
         reward += -0.5
