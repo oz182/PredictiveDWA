@@ -39,19 +39,31 @@ def get_forward_proxemic_cost(sim) -> float:
 
 def extract_nav_features(sim) -> np.ndarray:
     """
-    Minimal feature vector from current simulation state.
+    Minimal feature vector from current simulation state with normalization.
     Uses the same quantities already computed in Robot.get_navigation_info.
     Must match the training script feature extraction exactly.
     """
     nav = sim.robot.get_navigation_info(2)
     # waypoint(2), door_position(2), door_angle(1), linear_velocity(1), angular_velocity(1), closest_obstacle_distance(1)
     feat = []
-    feat.extend(list(nav['waypoint']))
-    feat.extend(list(nav['door_position']))
-    feat.append(float(nav['door_angle']))
-    feat.append(float(nav['linear_velocity']))
-    feat.append(float(nav['angular_velocity']))
-    feat.append(float(nav['closest_obstacle_distance']))
+    
+    # Normalize waypoint position (assuming corridor is ~10m long)
+    waypoint = np.array(nav['waypoint'])
+    feat.extend(list(waypoint / 10.0))
+    
+    # Normalize door position (assuming corridor is ~10m long)
+    door_pos = np.array(nav['door_position'])
+    feat.extend(list(door_pos / 10.0))
+    
+    # Normalize door angle to [-1, 1]
+    feat.append(float(nav['door_angle']) / np.pi)
+    
+    # Normalize velocities (assuming max ~2 m/s)
+    feat.append(float(nav['linear_velocity']) / 2.0)
+    feat.append(float(nav['angular_velocity']) / 2.0)
+    
+    # Normalize closest obstacle distance (assuming max sensing ~5m)
+    feat.append(float(nav['closest_obstacle_distance']) / 5.0)
     
     # Count people within velocity-based dynamic radius
     velocity_magnitude = np.linalg.norm(sim.robot.velocity)
@@ -62,9 +74,10 @@ def extract_nav_features(sim) -> np.ndarray:
             dist = np.linalg.norm(person.position - sim.robot.position)
             if dist <= sensing_radius:
                 num_people_nearby += 1
-    feat.append(float(num_people_nearby))
+    # Normalize by max expected people (e.g., 5)
+    feat.append(float(num_people_nearby) / 5.0)
     
-    # Forward proxemic cost from costmap
+    # Forward proxemic cost from costmap (already 0-1)
     forward_cost = get_forward_proxemic_cost(sim)
     feat.append(float(forward_cost))
     
@@ -74,7 +87,8 @@ def extract_nav_features(sim) -> np.ndarray:
 def load_model(model_path, device='cpu'):
     input_dim = 10  # 8 original + num_people_nearby + forward_proxemic_cost
     num_actions = 4  # must match training script
-    net = ThetaQNet(input_dim, num_actions)
+    hidden_dim = 256  # Updated to match training (was 128)
+    net = ThetaQNet(input_dim, num_actions, hidden=hidden_dim)
     state = torch.load(model_path, map_location=device)
     net.load_state_dict(state)
     net.eval()

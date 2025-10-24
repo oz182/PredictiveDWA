@@ -2,6 +2,7 @@ import os
 import sys
 import math
 import random
+import json
 from collections import deque
 
 import numpy as np
@@ -18,18 +19,30 @@ from learning.rl_theta_net import ThetaQNet
 
 def extract_nav_features(sim) -> np.ndarray:
     """
-    Minimal feature vector from current simulation state.
+    Minimal feature vector from current simulation state with normalization.
     Uses the same quantities already computed in Robot.get_navigation_info.
     """
     nav = sim.robot.get_navigation_info(2)
     # waypoint(2), door_position(2), door_angle(1), linear_velocity(1), angular_velocity(1), closest_obstacle_distance(1)
     feat = []
-    feat.extend(list(nav['waypoint']))
-    feat.extend(list(nav['door_position']))
-    feat.append(float(nav['door_angle']))
-    feat.append(float(nav['linear_velocity']))
-    feat.append(float(nav['angular_velocity']))
-    feat.append(float(nav['closest_obstacle_distance']))
+    
+    # Normalize waypoint position (assuming corridor is ~10m long)
+    waypoint = np.array(nav['waypoint'])
+    feat.extend(list(waypoint / 10.0))
+    
+    # Normalize door position (assuming corridor is ~10m long)
+    door_pos = np.array(nav['door_position'])
+    feat.extend(list(door_pos / 10.0))
+    
+    # Normalize door angle to [-1, 1]
+    feat.append(float(nav['door_angle']) / np.pi)
+    
+    # Normalize velocities (assuming max ~2 m/s)
+    feat.append(float(nav['linear_velocity']) / 2.0)
+    feat.append(float(nav['angular_velocity']) / 2.0)
+    
+    # Normalize closest obstacle distance (assuming max sensing ~5m)
+    feat.append(float(nav['closest_obstacle_distance']) / 5.0)
     
     # Count people within velocity-based dynamic radius
     velocity_magnitude = np.linalg.norm(sim.robot.velocity)
@@ -40,9 +53,10 @@ def extract_nav_features(sim) -> np.ndarray:
             dist = np.linalg.norm(person.position - sim.robot.position)
             if dist <= sensing_radius:
                 num_people_nearby += 1
-    feat.append(float(num_people_nearby))
+    # Normalize by max expected people (e.g., 5)
+    feat.append(float(num_people_nearby) / 5.0)
     
-    # Forward proxemic cost from costmap
+    # Forward proxemic cost from costmap (already 0-1)
     forward_cost = get_forward_proxemic_cost(sim)
     feat.append(float(forward_cost))
     
@@ -304,9 +318,9 @@ def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
     goal_pos = sim.robot.goal
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
-    # Progress reward: positive if moving towards goal
+    # Progress reward: scaled up to be more significant
     progress = (progress_prev_dist - dist)
-    reward = 1.0 * progress
+    reward = 5.0 * progress  # Increased from 1.0 to make progress more rewarding
 
     # Compute continuous person proxemic penetration
     max_penetration = 0.0
@@ -316,24 +330,24 @@ def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
         penetration = compute_proxemic_penetration(sim, person)
         max_penetration = max(max_penetration, penetration)
     
-    # Graduated penalty for person proxemics (exponential)
+    # Graduated penalty for person proxemics (exponential) - reduced magnitude
     if max_penetration > 0.0:
-        reward += -2.0 * (max_penetration ** 1.5)
+        reward += -1.0 * (max_penetration ** 1.5)  # Reduced from -2.0
     else:
-        # Bonus for staying in free space
-        reward += 0.2
+        # Small bonus for staying in free space
+        reward += 0.05  # Reduced from 0.2 to avoid inflating rewards
     
     # Compute continuous door penetration
     door_penetration = compute_door_penetration(sim)
     
-    # Graduated penalty for door (exponential)
+    # Graduated penalty for door (exponential) - reduced
     if door_penetration > 0.0:
-        reward += -1.0 * (door_penetration ** 1.5)
+        reward += -0.5 * (door_penetration ** 1.5)  # Reduced from -1.0
 
-    # Time penalty (encourage faster navigation)
-    reward += -0.005
+    # Reduced time penalty to not dominate the reward signal
+    reward += -0.001  # Reduced from -0.005
 
-    # Collision penalty
+    # Collision penalty - reduced to be less catastrophic
     collisions = sim.collision_count
     info = {
         'distance': dist,
@@ -344,11 +358,19 @@ def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
     # If a collision occurred in this step (heuristic: last history item within ~0.2s)
     if sim.collision_history:
         if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -5.0
+            reward += -2.0  # Reduced from -5.0
 
-    # Goal bonus
+    # Graduated goal proximity reward to guide the agent
     if dist < 1.0:
-        reward += 25.0
+        reward += 50.0  # Increased from 25.0 - major success!
+    elif dist < 2.0:
+        reward += 10.0  # New: intermediate reward for getting close
+    elif dist < 3.0:
+        reward += 5.0   # New: smaller reward for approaching
+    
+    # Additional penalty for moving away from goal (negative progress)
+    if progress < -0.1:
+        reward += -1.0
 
     return reward, dist, info
 
@@ -422,13 +444,13 @@ def main():
     qnet = ThetaQNet(input_dim, num_actions)
     target_qnet = ThetaQNet(input_dim, num_actions)
     target_qnet.load_state_dict(qnet.state_dict())
-    optimizer = optim.Adam(qnet.parameters(), lr=1e-3)
+    optimizer = optim.Adam(qnet.parameters(), lr=5e-5)  # Reduced from 1e-3 for stability
 
     gamma = 0.99
     tau = 0.01
     epsilon_start = 1.0
     epsilon_end = 0.05
-    epsilon_decay_steps = 10_000
+    epsilon_decay_steps = 100_000  # Increased from 10k to allow more exploration
     batch_size = 64
     buffer = deque(maxlen=50_000)
 
@@ -470,16 +492,19 @@ def main():
         loss = nn.functional.mse_loss(q, target)
         optimizer.zero_grad()
         loss.backward()
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(qnet.parameters(), max_norm=10.0)
         optimizer.step()
         soft_update()
         return {'loss': float(loss.item())}
 
     # Training loop (episodes of the headless simulation)
-    episodes = 300
+    episodes = 80
     max_steps = 800
     dt = 1/60.0
     global_step = 0
     episode_returns = []  # Track cumulative rewards for plotting
+    warmup_steps = 1000  # Fill buffer before training starts
 
     for ep in range(episodes):
         sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
@@ -514,7 +539,10 @@ def main():
 
             # Reward
             reward, prev_dist, info = compute_reward(sim, prev_dist)
-            episode_return += reward
+            
+            # Clip reward to prevent extreme outliers from destabilizing learning
+            reward_clipped = np.clip(reward, -10.0, 50.0)
+            episode_return += reward  # Track unclipped for monitoring
             
             # Track max penetration values
             max_person_pen = max(max_person_pen, info['max_person_penetration'])
@@ -523,11 +551,14 @@ def main():
             # Next features
             next_feat = extract_nav_features(sim)
 
-            # Store transition
-            buffer.append((state_feat, action_idx, reward, next_feat, float(done_flag)))
+            # Store transition with clipped reward
+            buffer.append((state_feat, action_idx, reward_clipped, next_feat, float(done_flag)))
 
-            # Learn
-            metrics = optimize()
+            # Learn (only after warmup period)
+            if global_step >= warmup_steps:
+                metrics = optimize()
+            else:
+                metrics = {}
 
             global_step += 1
             if done_flag:
@@ -549,6 +580,29 @@ def main():
     os.makedirs('checkpoints', exist_ok=True)
     torch.save(qnet.state_dict(), os.path.join('checkpoints', 'theta_qnet.pt'))
     print('Saved model to checkpoints/theta_qnet.pt')
+    
+    # Save hyperparameters
+    hyperparams = {
+        'learning_rate': 5e-5,
+        'gamma': gamma,
+        'tau': tau,
+        'epsilon_start': epsilon_start,
+        'epsilon_end': epsilon_end,
+        'epsilon_decay_steps': epsilon_decay_steps,
+        'batch_size': batch_size,
+        'buffer_size': 50_000,
+        'hidden_dim': 256,
+        'episodes': episodes,
+        'max_steps_per_episode': max_steps,
+        'warmup_steps': warmup_steps,
+        'reward_clip_range': [-10.0, 50.0],
+        'gradient_clip_norm': 10.0,
+        'theta_actions_degrees': [10, 20, 30, 45],
+        'feature_normalization': True,
+    }
+    with open(os.path.join('checkpoints', 'hyperparameters.json'), 'w') as f:
+        json.dump(hyperparams, f, indent=2)
+    print('Saved hyperparameters to checkpoints/hyperparameters.json')
 
 
 if __name__ == '__main__':
