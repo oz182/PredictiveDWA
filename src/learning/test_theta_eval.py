@@ -13,8 +13,38 @@ from sim.sim import Simulation
 from learning.rl_theta_net import ThetaQNet
 
 
+def get_forward_proxemic_cost(sim) -> float:
+    """
+    Extract average costmap value in forward-looking region.
+    Returns normalized value 0.0-1.0.
+    """
+    costmap = sim.robot.get_egocentric_costmap(size=4.0, resolution=0.1)
+    grid_size = costmap.shape[0]
+    
+    # Forward region: front quarter of costmap
+    # Costmap is robot-centric with robot at center
+    center = grid_size // 2
+    quarter = grid_size // 4
+    
+    # Extract front quarter (ahead of robot)
+    forward_region = costmap[center-quarter:center+quarter, center:]
+    
+    # Compute mean and normalize to 0-1
+    if forward_region.size > 0:
+        mean_cost = np.mean(forward_region) / 255.0
+        return float(mean_cost)
+    else:
+        return 0.0
+
+
 def extract_nav_features(sim) -> np.ndarray:
+    """
+    Minimal feature vector from current simulation state.
+    Uses the same quantities already computed in Robot.get_navigation_info.
+    Must match the training script feature extraction exactly.
+    """
     nav = sim.robot.get_navigation_info(2)
+    # waypoint(2), door_position(2), door_angle(1), linear_velocity(1), angular_velocity(1), closest_obstacle_distance(1)
     feat = []
     feat.extend(list(nav['waypoint']))
     feat.extend(list(nav['door_position']))
@@ -22,11 +52,27 @@ def extract_nav_features(sim) -> np.ndarray:
     feat.append(float(nav['linear_velocity']))
     feat.append(float(nav['angular_velocity']))
     feat.append(float(nav['closest_obstacle_distance']))
+    
+    # Count people within velocity-based dynamic radius
+    velocity_magnitude = np.linalg.norm(sim.robot.velocity)
+    sensing_radius = np.clip(velocity_magnitude * 2.5, 1.5, 4.0)
+    num_people_nearby = 0
+    for person in sim.robot.people:
+        if person.active:
+            dist = np.linalg.norm(person.position - sim.robot.position)
+            if dist <= sensing_radius:
+                num_people_nearby += 1
+    feat.append(float(num_people_nearby))
+    
+    # Forward proxemic cost from costmap
+    forward_cost = get_forward_proxemic_cost(sim)
+    feat.append(float(forward_cost))
+    
     return np.asarray(feat, dtype=np.float32)
 
 
 def load_model(model_path, device='cpu'):
-    input_dim = 8
+    input_dim = 10  # 8 original + num_people_nearby + forward_proxemic_cost
     num_actions = 4  # must match training script
     net = ThetaQNet(input_dim, num_actions)
     state = torch.load(model_path, map_location=device)
