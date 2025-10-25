@@ -1,6 +1,7 @@
 import math
 import numpy as np
 from typing import List, Tuple
+import scipy.stats as stats
 
 from sim.person import Person  # keep parity with the original planner
 
@@ -17,6 +18,22 @@ class TSDWA:
     2. **Path‑curvature‑coupled angular samples** (ω = v * κ  + α * θ_offset).
     3. A *minimal* set of lateral / reverse samples for escape behaviour.
     4. Hooks to plug into the existing scoring pipeline (goal, clearance, velocity).
+    5. **Weighted asymmetric sampling** with multiple distribution strategies.
+
+    Asymmetric Sampling
+    -------------------
+    The planner supports multiple sampling strategies for creating biased heading
+    distributions around the path heading:
+
+    - **uniform**: Evenly-spaced samples (default, symmetric)
+    - **power**: Power-law distribution based on left/right weight ratio
+    - **gaussian**: Normal distribution with offset based on weight ratio
+    - **beta**: Beta distribution using left/right weights as shape parameters
+
+    Use `left_weight` and `right_weight` parameters to control sampling density:
+    - Higher weight on one side = more samples on that side
+    - Equal weights (1.0, 1.0) = symmetric sampling
+    - Example: left_weight=1.0, right_weight=2.0 = bias towards right
 
     The public API intentionally mirrors the original DWA so existing simulation
     scripts (GUI, visualisers, episode runners) continue to work unchanged.
@@ -41,6 +58,9 @@ class TSDWA:
         theta_range: float = math.pi/3,  # θ_range   (±30° cone)
         alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
+        sampling_strategy: str = "beta",  # Strategy: "uniform", "power", "gaussian", "beta"
+        left_weight: float = 1.0,       # Sampling density weight for left side
+        right_weight: float = 0.3,      # Sampling density weight for right side
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
         self.position = position
@@ -62,6 +82,9 @@ class TSDWA:
         self.theta_range = theta_range
         self.alpha_ph = alpha_ph
         self.n_skip = n_skip
+        self.sampling_strategy = sampling_strategy
+        self.left_weight = left_weight
+        self.right_weight = right_weight
 
         # Dynamics / limits replicate original values so scoring remains valid ----
         self.max_rotation = math.pi
@@ -160,6 +183,255 @@ class TSDWA:
     # ─── INTERNAL UTILITIES ─────────────────────────────────────────────
     # ------------------------------------------------------------------
 
+    def _generate_weighted_headings(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Generate heading angles using the configured sampling strategy.
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading (path heading in robot frame).
+        theta_range : float
+            Angular extent to sample on each side of theta_ph.
+        n_samples : int
+            Number of heading samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Array of heading angles in radians.
+        """
+        if self.sampling_strategy == "uniform":
+            return self._uniform_sampling(theta_ph, theta_range, n_samples)
+        elif self.sampling_strategy == "power":
+            return self._power_law_sampling(theta_ph, theta_range, n_samples)
+        elif self.sampling_strategy == "gaussian":
+            return self._gaussian_sampling(theta_ph, theta_range, n_samples)
+        elif self.sampling_strategy == "beta":
+            return self._beta_sampling(theta_ph, theta_range, n_samples)
+        else:
+            raise ValueError(
+                f"Unknown sampling_strategy '{self.sampling_strategy}'. "
+                f"Expected one of: 'uniform', 'power', 'gaussian', 'beta'."
+            )
+
+    def _uniform_sampling(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Uniform (evenly-spaced) sampling strategy.
+        
+        This is the baseline symmetric sampling approach. Generates samples
+        evenly distributed across the full angular range.
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading angle.
+        theta_range : float
+            Angular extent on each side.
+        n_samples : int
+            Number of samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Evenly-spaced heading angles.
+        """
+        return np.linspace(
+            theta_ph - theta_range,
+            theta_ph + theta_range,
+            n_samples
+        )
+
+    def _power_law_sampling(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Power-law biased sampling strategy.
+        
+        Applies a power transformation to create asymmetric sampling density.
+        The power parameter is derived from the ratio of right_weight to left_weight:
+        - power > 1: More samples on the left (smaller angles)
+        - power < 1: More samples on the right (larger angles)
+        - power = 1: Uniform sampling
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading angle.
+        theta_range : float
+            Angular extent on each side.
+        n_samples : int
+            Number of samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Power-law distributed heading angles.
+        """
+        # Calculate power from weight ratio
+        # right_weight > left_weight means we want more samples on right (power < 1)
+        power = self.left_weight / (self.right_weight + 1e-6)
+        
+        # Generate uniform samples in [0, 1]
+        uniform = np.linspace(0, 1, n_samples)
+        
+        # Apply power transformation
+        biased = uniform ** power
+        
+        # Map to angular range [theta_ph - theta_range, theta_ph + theta_range]
+        headings = theta_ph - theta_range + biased * (2 * theta_range)
+        
+        return headings
+
+    def _gaussian_sampling(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Gaussian (normal) distribution sampling strategy.
+        
+        Generates samples from a normal distribution with the mean offset
+        based on the weight ratio. Uses deterministic percentile-based sampling
+        to avoid randomness.
+        
+        Weight interpretation:
+        - right_weight > left_weight: Mean shifts right (positive offset)
+        - left_weight > right_weight: Mean shifts left (negative offset)
+        - equal weights: Centered at theta_ph
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading angle.
+        theta_range : float
+            Angular extent on each side.
+        n_samples : int
+            Number of samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Gaussian-distributed heading angles clipped to range.
+        """
+        # Calculate offset based on weight ratio
+        # Normalized difference gives direction and magnitude of bias
+        weight_sum = self.left_weight + self.right_weight + 1e-6
+        weight_diff = (self.right_weight - self.left_weight) / weight_sum
+        offset = weight_diff * theta_range * 0.5  # Scale to half range
+        
+        # Standard deviation: use a fraction of range to ensure good coverage
+        std_dev = theta_range / 2.5
+        
+        # Generate deterministic samples using percentiles (inverse CDF)
+        # Evenly spaced percentiles from 0.5% to 99.5% to avoid extreme tails
+        percentiles = np.linspace(0.005, 0.995, n_samples)
+        
+        # Convert percentiles to z-scores (inverse CDF of standard normal)
+        # Using approximation for inverse error function
+        z_scores = np.sqrt(2) * self._erfinv(2 * percentiles - 1)
+        
+        # Transform to actual heading angles
+        headings = theta_ph + offset + z_scores * std_dev
+        
+        # Clip to stay within the allowed range
+        headings = np.clip(
+            headings,
+            theta_ph - theta_range,
+            theta_ph + theta_range
+        )
+        
+        return headings
+
+    def _erfinv(self, x: np.ndarray) -> np.ndarray:
+        """Approximate inverse error function for Gaussian sampling.
+        
+        Uses a polynomial approximation that's accurate enough for sampling.
+        
+        Parameters
+        ----------
+        x : np.ndarray
+            Input values in range [-1, 1].
+            
+        Returns
+        -------
+        np.ndarray
+            Approximate inverse error function values.
+        """
+        # Simple polynomial approximation (accurate to ~0.01)
+        a = 0.147
+        sign = np.sign(x)
+        x = np.abs(x)
+        
+        ln_term = np.log(1 - x * x + 1e-10)
+        term1 = 2 / (np.pi * a) + ln_term / 2
+        term2 = ln_term / a
+        
+        result = sign * np.sqrt(-term1 + np.sqrt(term1 * term1 - term2))
+        return result
+
+    def _beta_sampling(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Beta distribution sampling strategy.
+        
+        Uses the beta distribution which naturally supports asymmetric shapes
+        bounded to [0, 1]. The left_weight and right_weight directly map to
+        the beta distribution's alpha and beta parameters.
+        
+        Weight interpretation (after scaling):
+        - left_weight > right_weight: More samples on left (alpha > beta)
+        - right_weight > left_weight: More samples on right (beta > alpha)
+        - equal weights: Symmetric distribution
+        
+        Requires scipy.stats. Falls back to power-law if scipy unavailable.
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading angle.
+        theta_range : float
+            Angular extent on each side.
+        n_samples : int
+            Number of samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Beta-distributed heading angles.
+        """
+        try:
+            from scipy.stats import beta
+        except ImportError:
+            # Fallback to power-law if scipy not available
+            print(
+                "Warning: scipy not available for beta sampling. "
+                "Falling back to power-law sampling."
+            )
+            return self._power_law_sampling(theta_ph, theta_range, n_samples)
+        
+        # Map weights to beta distribution parameters
+        # Scale to reasonable range (0.5 to 5.0) for good distribution shapes
+        min_param = 0.5
+        max_param = 5.0
+        
+        # Normalize weights
+        total_weight = self.left_weight + self.right_weight + 1e-6
+        left_norm = self.left_weight / total_weight
+        right_norm = self.right_weight / total_weight
+        
+        # Map to beta parameters (higher weight = higher parameter value)
+        # This creates bias towards that side
+        alpha = min_param + left_norm * (max_param - min_param) * 2
+        beta_param = min_param + right_norm * (max_param - min_param) * 2
+        
+        # Generate deterministic samples using percentiles
+        percentiles = np.linspace(0.01, 0.99, n_samples)
+        beta_samples = beta.ppf(percentiles, alpha, beta_param)
+        
+        # Map from [0, 1] to angular range
+        headings = theta_ph - theta_range + beta_samples * (2 * theta_range)
+        
+        return headings
+
     def _extract_heading(self, global_path: List[np.ndarray]) -> float:
         """Extract path heading by finding closest point and looking ahead."""
         if len(global_path) < 2:
@@ -238,10 +510,9 @@ class TSDWA:
         v_min, v_max, w_min, w_max = dw
 
         # Translational sampling in polar space ---------------------------
-        headings = np.linspace(
-            theta_ph - self.theta_range,
-            theta_ph + self.theta_range,
-            self.n_heading,
+        # Use weighted sampling strategy for heading angles
+        headings = self._generate_weighted_headings(
+            theta_ph, self.theta_range, self.n_heading
         )
         speeds = np.linspace(self.max_speed * 0.1, self.max_speed, self.n_speed)
 
