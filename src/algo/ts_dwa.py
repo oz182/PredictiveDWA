@@ -1,6 +1,7 @@
 import math
 import numpy as np
 from typing import List, Tuple
+import scipy.stats as stats
 
 from sim.person import Person  # keep parity with the original planner
 
@@ -57,9 +58,9 @@ class TSDWA:
         theta_range: float = math.pi/3,  # θ_range   (±30° cone)
         alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
-        sampling_strategy: str = "power",  # Strategy: "uniform", "power", "gaussian", "beta"
+        sampling_strategy: str = "beta",  # Strategy: "uniform", "power", "gaussian", "beta"
         left_weight: float = 1.0,       # Sampling density weight for left side
-        right_weight: float = 0.0001,      # Sampling density weight for right side
+        right_weight: float = 0.3,      # Sampling density weight for right side
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
         self.position = position
