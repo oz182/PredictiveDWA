@@ -4,6 +4,7 @@ from typing import List, Tuple
 import scipy.stats as stats
 
 from sim.person import Person  # keep parity with the original planner
+from scipy.stats import beta
 
 
 class TSDWA:
@@ -59,8 +60,8 @@ class TSDWA:
         alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
         sampling_strategy: str = "beta",  # Strategy: "uniform", "power", "gaussian", "beta"
-        left_weight: float = 1.0,       # Sampling density weight for left side
-        right_weight: float = 0.3,      # Sampling density weight for right side
+        left_weight: float = 1.1,       # Sampling density weight for left side
+        right_weight: float = 5,      # Sampling density weight for right side
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
         self.position = position
@@ -368,7 +369,7 @@ class TSDWA:
         result = sign * np.sqrt(-term1 + np.sqrt(term1 * term1 - term2))
         return result
 
-    def _beta_sampling(
+    def _beta_sampling_v0(
         self, theta_ph: float, theta_range: float, n_samples: int
     ) -> np.ndarray:
         """Beta distribution sampling strategy.
@@ -417,6 +418,7 @@ class TSDWA:
         total_weight = self.left_weight + self.right_weight + 1e-6
         left_norm = self.left_weight / total_weight
         right_norm = self.right_weight / total_weight
+        print(f"left_norm: {left_norm}, right_norm: {right_norm}")
         
         # Map to beta parameters (higher weight = higher parameter value)
         # This creates bias towards that side
@@ -430,6 +432,153 @@ class TSDWA:
         # Map from [0, 1] to angular range
         headings = theta_ph - theta_range + beta_samples * (2 * theta_range)
         
+        return headings
+
+    def _beta_sampling_v1(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Beta distribution sampling strategy.
+        
+        Uses the beta distribution which naturally supports asymmetric shapes
+        bounded to [0, 1]. The left_weight and right_weight directly map to
+        the beta distribution's alpha and beta parameters.
+        
+        Weight interpretation (after scaling):
+        - left_weight > right_weight: More samples on left (alpha > beta)
+        - right_weight > left_weight: More samples on right (beta > alpha)
+        - equal weights: Symmetric distribution
+        
+        Requires scipy.stats. 
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading angle.
+        theta_range : float
+            Angular extent on each side.
+        n_samples : int
+            Number of samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Beta-distributed heading angles.
+        """
+        
+        # Map weights to beta distribution parameters
+        # Scale to reasonable range (0 to 10) for good distribution shapes
+        def weights_to_beta_params(left_weight, right_weight, pmin=0.5, pmax=5.0, k=1.0):
+            # softmax with numerical stability
+            a = k * left_weight
+            b = k * right_weight
+            m = max(a, b)
+            ea = np.exp(a - m)
+            eb = np.exp(b - m)
+            p_left = ea / (ea + eb)     # in (0,1)
+            p_right = 1.0 - p_left      # in (0,1)
+
+            alpha = pmin + p_left  * (pmax - pmin)
+            beta  = pmin + p_right * (pmax - pmin)
+            return alpha, beta
+        alpha_param, beta_param = weights_to_beta_params(self.left_weight, self.right_weight)
+
+        # Exclude low-density regions: keep only u where pdf(u) >= lambda * max_pdf
+        density_threshold_fraction = 0.1  # keep regions with at least 10% of peak density
+        u_grid = np.linspace(0.0, 1.0, 401)
+        pdf_vals = beta.pdf(u_grid, alpha_param, beta_param)
+        max_pdf = np.max(pdf_vals) + 1e-12
+        keep_mask = pdf_vals >= (density_threshold_fraction * max_pdf)
+        if not np.any(keep_mask):
+            # Fallback: use central mass interval if threshold removed everything
+            p_min = 0.01
+            p_max = 0.99
+        else:
+            u_lo = float(u_grid[np.argmax(keep_mask)])
+            u_hi = float(u_grid[len(keep_mask) - np.argmax(keep_mask[::-1]) - 1])
+            # Convert to CDF bounds to sample deterministically within high-density region
+            p_min = float(beta.cdf(u_lo, alpha_param, beta_param))
+            p_max = float(beta.cdf(u_hi, alpha_param, beta_param))
+            # Guard against numerical collapse
+            if p_max - p_min < 1e-6:
+                p_min = max(0.0, p_min - 1e-3)
+                p_max = min(1.0, p_max + 1e-3)
+
+        percentiles = np.linspace(p_min, p_max, n_samples)
+        beta_samples = beta.ppf(percentiles, alpha_param, beta_param)
+
+        # Map from [0, 1] to [theta_ph - theta_range, theta_ph + theta_range]
+        headings = theta_ph - theta_range + beta_samples * (2 * theta_range)
+        print(f"theta_range: {theta_range}")
+        print(f"beta_samples: {beta_samples}")
+        print(f"headings: {headings}")
+        print(f"theta_ph: {theta_ph}")
+
+        return headings
+
+    def _beta_sampling(
+        self, theta_ph: float, theta_range: float, n_samples: int
+    ) -> np.ndarray:
+        """Beta distribution sampling strategy.
+        
+        Uses the beta distribution which naturally supports asymmetric shapes
+        bounded to [0, 1]. The left_weight and right_weight directly map to
+        the beta distribution's alpha and beta parameters.
+        
+        Weight interpretation (after scaling):
+        - left_weight > right_weight: More samples on left (alpha > beta)
+        - right_weight > left_weight: More samples on right (beta > alpha)
+        - equal weights: Symmetric distribution
+        
+        Requires scipy.stats. 
+        
+        Parameters
+        ----------
+        theta_ph : float
+            Center heading angle.
+        theta_range : float
+            Angular extent on each side.
+        n_samples : int
+            Number of samples to generate.
+            
+        Returns
+        -------
+        np.ndarray
+            Beta-distributed heading angles.
+        """
+        # Map left/right weights to Beta shape parameters via clipping and linear interpolation
+        # Clip weights to [-3, 3]
+        lw = float(np.clip(self.left_weight, -3.0, 3.0))
+        rw = float(np.clip(self.right_weight, -3.0, 3.0))
+        # Linearly interpolate to [0.5, 5.0]
+        def to_beta_param(x: float) -> float:
+            t = (x + 3.0) / 6.0  # map [-3,3] -> [0,1]
+            return 0.5 + t * (5.0 - 0.5)
+        alpha_param = to_beta_param(lw)
+        beta_param = to_beta_param(rw)
+        print(f"alpha_param: {alpha_param}, beta_param: {beta_param}")
+
+        # Threshold-based selection: keep u where pdf >= 0.5 * max(pdf) over u in [0.01, 0.99]
+        n = max(1, int(n_samples))
+        u = np.linspace(0.0, 1.0, 2001)
+        pdf_vals = beta.pdf(u, alpha_param, beta_param)
+        inner_mask = (u >= 0.01) & (u <= 0.99)
+        max_pdf = float(np.max(pdf_vals[inner_mask])) if np.any(inner_mask) else float(np.max(pdf_vals))
+        threshold = 0.5 * max_pdf
+        keep_mask = pdf_vals >= threshold
+
+        if not np.any(keep_mask):
+            # Fallback: uniform samples over [0,1]
+            u_samples = np.linspace(0.0, 1.0, n)
+        else:
+            u_kept = u[keep_mask]
+            if len(u_kept) >= n:
+                idxs = np.linspace(0, len(u_kept) - 1, n)
+                u_samples = u_kept[np.round(idxs).astype(int)]
+            else:
+                u_samples = np.linspace(float(u_kept[0]), float(u_kept[-1]), n)
+
+        # Map from [0, 1] to [theta_ph - theta_range, theta_ph + theta_range]
+        headings = theta_ph - theta_range + u_samples * (2 * theta_range)
         return headings
 
     def _extract_heading(self, global_path: List[np.ndarray]) -> float:
