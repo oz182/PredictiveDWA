@@ -2,3 +2,5 @@ pygame>=2.0.0
 numpy==1.26.4
 matplotlib>=3.5.0
 Pillow>=8.0.0
+wandb>=0.16.0
+optuna>=3.6.0
