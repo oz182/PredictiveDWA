@@ -10,12 +10,11 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 # Local imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
-from models.rl_theta_net import ThetaQNet
+from agents.ppo import PPO
 
 # Optional third-party integrations
 
@@ -257,24 +256,18 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Discrete theta_range actions (keep tiny and intuitive)
-    theta_actions = np.array([
-        math.radians(10),
-        math.radians(20),
-        math.radians(30),
-        math.radians(45),
-    ], dtype=np.float32)
-    num_actions = len(theta_actions)
+    # alpha and beta for beta sampling
+    num_actions = 2
 
-    # Environment / training hyperparameters
+    # Environment / training hyperparameters (algorithm-agnostic where possible)
     gamma = float(config.get('gamma', 0.99))
-    tau = float(config.get('tau', 0.01))
-    epsilon_start = float(config.get('epsilon_start', 1.0))
-    epsilon_end = float(config.get('epsilon_end', 0.05))
-    epsilon_decay_steps = int(config.get('epsilon_decay_steps', 10_000))
-    batch_size = int(config.get('batch_size', 64))
-    buffer_capacity = int(config.get('buffer_capacity', 50_000))
-    buffer = deque(maxlen=buffer_capacity)
+    # PPO-specific (but genericizable via agent config)
+    k_epochs = int(config.get('k_epochs', 10))
+    eps_clip = float(config.get('eps_clip', 0.2))
+    update_timestep = int(config.get('update_timestep', 2000))
+    action_select_interval = int(config.get('action_select_interval', 1))  # select new action every N steps
+    lr_actor = float(config.get('lr_actor', config.get('learning_rate', 1e-3)))
+    lr_critic = float(config.get('lr_critic', config.get('learning_rate', 1e-3)))
 
     # Env defaults (also used to infer feature dimension)
     dt = float(config.get('dt', 1/60.0))
@@ -294,60 +287,32 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     _ = tmp_sim.step(dt)
     input_dim = int(len(extract_nav_features(tmp_sim)))
 
-    # Q-network
+    # Build agent (PPO with discrete action space)
     hidden_size = int(config.get('hidden_size', 128))
-    qnet = ThetaQNet(input_dim, num_actions, hidden=hidden_size).to(device)
-    target_qnet = ThetaQNet(input_dim, num_actions, hidden=hidden_size).to(device)
-    target_qnet.load_state_dict(qnet.state_dict())
-    learning_rate = float(config.get('learning_rate', 1e-3))
-    optimizer = optim.Adam(qnet.parameters(), lr=learning_rate)
+    agent = PPO(
+        state_dim=input_dim,
+        action_dim=num_actions,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
+        gamma=gamma,
+        K_epochs=k_epochs,
+        eps_clip=eps_clip,
+        has_continuous_action_space=True,
+        action_std_init=0.6,
+    )
 
     if use_wandb and wandb is not None:
         wandb.init(project=str(config.get('wandb_project', 'PredictiveDWA')),
                    name=run_name, config=config, allow_val_change=True)
-        wandb.watch(qnet, log='all', log_freq=200)
+        # Watch PPO networks if available
+        try:
+            wandb.watch(agent.policy.actor, log='all', log_freq=200)
+            wandb.watch(agent.policy.critic, log='all', log_freq=200)
+        except Exception:
+            pass
 
-    def epsilon_by_step(step):
-        if step >= epsilon_decay_steps:
-            return epsilon_end
-        return epsilon_start + (epsilon_end - epsilon_start) * (step / epsilon_decay_steps)
-
-    def select_action(state_feat: np.ndarray, eps: float) -> int:
-        if random.random() < eps:
-            return random.randrange(num_actions)
-        with torch.no_grad():
-            s = torch.from_numpy(state_feat).unsqueeze(0).to(device)
-            q = qnet(s)
-            return int(q.argmax(dim=1).item())
-
-    def soft_update():
-        with torch.no_grad():
-            for target_param, param in zip(target_qnet.parameters(), qnet.parameters()):
-                target_param.data.mul_(1 - tau).add_(tau * param.data)
-
-    def optimize_step():
-        if len(buffer) < batch_size:
-            return {}
-        batch = random.sample(buffer, batch_size)
-        states = torch.tensor(np.stack([b[0] for b in batch], axis=0), dtype=torch.float32, device=device)
-        actions = torch.tensor([b[1] for b in batch], dtype=torch.long, device=device).unsqueeze(1)
-        rewards = torch.tensor([b[2] for b in batch], dtype=torch.float32, device=device).unsqueeze(1)
-        next_states = torch.tensor(np.stack([b[3] for b in batch], axis=0), dtype=torch.float32, device=device)
-        dones = torch.tensor([b[4] for b in batch], dtype=torch.float32, device=device).unsqueeze(1)
-
-        # Q(s,a)
-        q_values = qnet(states).gather(1, actions)
-        # target: r + gamma * max_a' Q_target(s', a') * (1 - done)
-        with torch.no_grad():
-            next_max_q = target_qnet(next_states).max(dim=1, keepdim=True)[0]
-            target_q = rewards + (1.0 - dones) * gamma * next_max_q
-
-        loss = nn.functional.mse_loss(q_values, target_q)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        soft_update()
-        return {'loss': float(loss.item())}
+    # PPO uses its own rollout buffer; updates are triggered by timesteps
+    time_step = 0
 
     # Training loop (episodes of the headless simulation)
     episodes = int(config.get('episodes', 50))
@@ -374,19 +339,37 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         episode_return = 0.0
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
 
+        # Storage for action repetition
+        prev_action_tuple = None  # (left_weight, right_weight)
+
         for t in range(max_steps):
             # Build state features
             state_feat = extract_nav_features(sim)
             #print(f"state_feat: {state_feat}")
 
-            # Epsilon-greedy pick of theta_range
-            eps = epsilon_by_step(global_step)
-            action_idx = select_action(state_feat, eps)
-            theta_val = float(theta_actions[action_idx])
+            # Decide whether to sample a new action or reuse previous one
+            if (t % action_select_interval == 0) or (prev_action_tuple is None):
+                # Sample new action via policy (also records state/action/logprob/value in buffer)
+                left_weight, right_weight = agent.select_action(state_feat)
+                prev_action_tuple = (float(left_weight), float(right_weight))
+            else:
+                # Reuse previous action but still log this step into PPO buffer
+                left_weight, right_weight = prev_action_tuple
+                policy_device = next(agent.policy.parameters()).device
+                state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
+                state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
+                action_tensor_batch = torch.tensor([[left_weight, right_weight]], dtype=torch.float32, device=policy_device)
+                with torch.no_grad():
+                    old_logprob, state_value, _ = agent.policy.evaluate(state_tensor_batch, action_tensor_batch)
+                # Match shapes used by select_action: state (no batch), action ([1, action_dim])
+                agent.buffer.states.append(state_tensor_no_batch)
+                agent.buffer.actions.append(action_tensor_batch)
+                agent.buffer.logprobs.append(old_logprob.detach())
+                agent.buffer.state_values.append(state_value.squeeze(0).detach())
 
-            # Set theta_range in the planner
-            if hasattr(sim.robot, 'nav') and hasattr(sim.robot.nav, 'theta_range'):
-                sim.robot.nav.theta_range = theta_val
+            # Set left_weight, right_weight in the planner
+            sim.robot.nav.left_weight = left_weight
+            sim.robot.nav.right_weight = right_weight
 
             # Step simulation
             _, _, done_flag = sim.step(dt)
@@ -398,17 +381,19 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             # Track overlap statistics
             overlap_counts[info['overlap_type']] += 1
 
-            # Next features
-            next_feat = extract_nav_features(sim)
+            # PPO bookkeeping
+            agent.buffer.rewards.append(float(reward))
+            agent.buffer.is_terminals.append(bool(done_flag))
 
-            # Store transition
-            buffer.append((state_feat, action_idx, reward, next_feat, float(done_flag)))
-
-            # Learn
-            metrics = optimize_step()
+            # Trigger update at fixed timesteps
+            time_step += 1
+            if time_step % update_timestep == 0:
+                agent.update()
 
             global_step += 1
             if done_flag:
+                # Update at episode boundary as well
+                agent.update()
                 break
 
         # Episode metrics
@@ -416,7 +401,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         overlap_pct = {k: 100 * v / total_steps for k, v in overlap_counts.items()}
         returns.append(episode_return)
 
-        print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps} | Eps: {eps:.2f}")
+        print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
 
         if use_wandb and wandb is not None:
@@ -424,7 +409,6 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'episode': ep + 1,
                 'return': episode_return,
                 'steps': total_steps,
-                'epsilon': eps,
                 'overlap_free_pct': overlap_pct['none'],
                 'overlap_person_pct': overlap_pct['person'],
                 'overlap_door_pct': overlap_pct['door'],
@@ -434,10 +418,10 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
     avg_return = float(np.mean(returns)) if returns else 0.0
 
-    # Save network
+    # Save policy
     os.makedirs('checkpoints', exist_ok=True)
-    torch.save(qnet.state_dict(), os.path.join('checkpoints', 'theta_qnet.pt'))
-    print('Saved model to checkpoints/theta_qnet.pt')
+    agent.save(os.path.join('checkpoints', 'theta_qnet.pt'))
+    print('Saved PPO policy to checkpoints/theta_qnet.pt')
 
     if use_wandb and wandb is not None:
         wandb.summary['avg_return'] = avg_return
@@ -454,12 +438,13 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
         # Suggest hyperparameters
         config = dict(base_config)
         config.update({
-            'learning_rate': trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True),
+            'lr_actor': trial.suggest_float('lr_actor', 1e-5, 5e-3, log=True),
+            'lr_critic': trial.suggest_float('lr_critic', 1e-5, 5e-3, log=True),
             'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256, 384]),
             'gamma': trial.suggest_float('gamma', 0.90, 0.999),
-            'tau': trial.suggest_float('tau', 0.001, 0.05, log=True),
-            'epsilon_decay_steps': trial.suggest_int('epsilon_decay_steps', 2_000, 30_000, step=1000),
-            'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
+            'k_epochs': trial.suggest_int('k_epochs', 5, 20),
+            'eps_clip': trial.suggest_float('eps_clip', 0.1, 0.3),
+            'update_timestep': trial.suggest_int('update_timestep', 1000, 5000, step=500),
         })
         # Shorter training for objective
         config['episodes'] = int(base_config.get('optuna_episodes', 12))
@@ -480,16 +465,18 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Train ThetaQNet with optional W&B logging and Optuna tuning')
+    parser = argparse.ArgumentParser(description='Train navigation policy with PPO (agent-agnostic structure)')
     parser.add_argument('--episodes', type=int, default=50)
     parser.add_argument('--max-steps', type=int, default=800)
     parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr-actor', type=float, default=None)
+    parser.add_argument('--lr-critic', type=float, default=None)
     parser.add_argument('--hidden', type=int, default=128)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--tau', type=float, default=0.01)
-    parser.add_argument('--eps-decay-steps', type=int, default=10_000)
-    parser.add_argument('--batch-size', type=int, default=64)
-    parser.add_argument('--buffer', type=int, default=50_000)
+    parser.add_argument('--k-epochs', type=int, default=10)
+    parser.add_argument('--eps-clip', type=float, default=0.2)
+    parser.add_argument('--update-timestep', type=int, default=2000)
+    parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use-wandb', action='store_true')
     parser.add_argument('--wandb-project', type=str, default='PredictiveDWA')
@@ -508,14 +495,14 @@ def main():
         'episodes': args.episodes,
         'max_steps': args.max_steps,
         'learning_rate': args.lr,
+        'lr_actor': args.lr_actor if args.lr_actor is not None else args.lr,
+        'lr_critic': args.lr_critic if args.lr_critic is not None else args.lr,
         'hidden_size': args.hidden,
         'gamma': args.gamma,
-        'tau': args.tau,
-        'epsilon_start': 1.0,
-        'epsilon_end': 0.05,
-        'epsilon_decay_steps': args.eps_decay_steps,
-        'batch_size': args.batch_size,
-        'buffer_capacity': args.buffer,
+        'k_epochs': args.k_epochs,
+        'eps_clip': args.eps_clip,
+        'update_timestep': args.update_timestep,
+        'action_select_interval': args.action_select_interval,
         'seed': args.seed,
         'wandb_project': args.wandb_project,
         # Env defaults

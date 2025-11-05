@@ -8,10 +8,10 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
 from agents.ppo import PPO
-from train import extract_nav_features
+from learning.train import extract_nav_features
 
 
 def load_model(model_path, device='cpu'):

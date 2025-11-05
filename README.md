@@ -81,16 +81,27 @@ python src/main/run.py --no-render
 
 #### Training
 
-Train the theta-range Q-network:
+Train the theta-range Q-network (DQN-based):
 ```bash
 python src/learning/train_theta_range.py
+```
+
+Train with PPO (continuous action space for left/right weights):
+```bash
+python src/learning/train.py
+
+# With W&B logging
+python src/learning/train.py --use-wandb
+
+# Hyperparameter search with Optuna
+python src/learning/train.py --optuna-trials 20
 ```
 
 Trained models are saved to `checkpoints/theta_qnet.pt` with hyperparameters in `checkpoints/hyperparameters.json`.
 
 #### Evaluation
 
-Test a trained model:
+Test a trained model with the DQN-based theta-range network:
 ```bash
 # Without visualization
 python src/learning/test_theta_eval.py
@@ -100,6 +111,18 @@ python src/learning/test_theta_eval.py --render
 
 # Custom model path and number of episodes
 python src/learning/test_theta_eval.py --model checkpoints/custom_model.pt --episodes 5
+```
+
+Test a trained PPO model:
+```bash
+# With visualization
+python src/learning/test.py --render
+
+# Without visualization
+python src/learning/test.py
+
+# Custom action selection interval (reuse action every N steps)
+python src/learning/test.py --render --action-select-interval 5
 ```
 
 ### Monte Carlo Simulations
@@ -148,9 +171,11 @@ PredictiveDWA/
 │   │   ├── dwa.py
 │   │   └── ts_dwa.py
 │   └── learning/       # RL training and evaluation
-│       ├── rl_theta_net.py
-│       ├── train_theta_range.py
-│       ├── test_theta_eval.py
+│       ├── train_theta_range.py      # DQN training (discrete theta actions)
+│       ├── train_theta_range_v1.py   # Legacy DQN training
+│       ├── train.py                   # PPO training (continuous weights)
+│       ├── test_theta_eval.py         # Test DQN models
+│       ├── test.py                    # Test PPO models
 │       └── monte_carlo.py
 ├── checkpoints/        # Saved models
 ├── logs/              # Training logs

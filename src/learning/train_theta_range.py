@@ -2,64 +2,82 @@ import os
 import sys
 import math
 import random
-import json
 from collections import deque
+import argparse
+import time
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import matplotlib.pyplot as plt
 
 # Local imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
 from models.rl_theta_net import ThetaQNet
 
+# Optional third-party integrations
+
+import wandb  
+import optuna  
+
+
 
 def extract_nav_features(sim) -> np.ndarray:
     """
-    Minimal feature vector from current simulation state with normalization.
-    Uses the same quantities already computed in Robot.get_navigation_info.
+    Feature vector from current simulation state.
+    Includes:
+      - waypoint(2), door_position(2), door_angle(1)
+      - linear_velocity(1), angular_velocity(1)
+      - three closest people relative positions wrt robot: [(dx, dy) x 3] (pad with large value if <3)
+      - distances to corridor left and right boundaries (y - y_min, y_max - y)
     """
     nav = sim.robot.get_navigation_info(2)
-    # waypoint(2), door_position(2), door_angle(1), linear_velocity(1), angular_velocity(1), closest_obstacle_distance(1)
+
+    robot_pos = np.asarray(sim.robot.position, dtype=float)
+    large_val = 10
+
+    # Compute three closest people relative positions (dx, dy)
+    rel_people: list[tuple[float, float, float]] = []  # (dist, dx, dy)
+    if hasattr(sim.robot, 'people'):
+        for person in sim.robot.people:
+            if getattr(person, 'active', True):
+                p = np.asarray(person.position, dtype=float)
+                dx = float(p[0] - robot_pos[0])
+                dy = float(p[1] - robot_pos[1])
+                d = math.hypot(dx, dy)
+                rel_people.append((d, dx, dy))
+    rel_people.sort(key=lambda t: t[0])
+    # Take up to 3, pad if fewer
+    rel_feats: list[float] = []
+    for i in range(3):
+        if i < len(rel_people):
+            _, dx, dy = rel_people[i]
+            rel_feats.extend([dx, dy])
+        else:
+            rel_feats.extend([large_val, large_val])
+
+    # Distances to corridor left/right sides using y-bounds
+    dist_left = float(large_val)
+    dist_right = float(large_val)
+    if hasattr(sim.robot, 'corridor_bounds'):
+        bounds = sim.robot.corridor_bounds
+        y_min = float(bounds['y_min'])
+        y_max = float(bounds['y_max'])
+        y = float(robot_pos[1])
+        dist_left = max(0.0, y - y_min)
+        dist_right = max(0.0, y_max - y)
+
     feat = []
-    
-    # Normalize waypoint position (assuming corridor is ~10m long)
-    waypoint = np.array(nav['waypoint'])
-    feat.extend(list(waypoint / 10.0))
-    
-    # Normalize door position (assuming corridor is ~10m long)
-    door_pos = np.array(nav['door_position'])
-    feat.extend(list(door_pos / 10.0))
-    
-    # Normalize door angle to [-1, 1]
-    feat.append(float(nav['door_angle']) / np.pi)
-    
-    # Normalize velocities (assuming max ~2 m/s)
-    feat.append(float(nav['linear_velocity']) / 2.0)
-    feat.append(float(nav['angular_velocity']) / 2.0)
-    
-    # Normalize closest obstacle distance (assuming max sensing ~5m)
-    feat.append(float(nav['closest_obstacle_distance']) / 5.0)
-    
-    # Count people within velocity-based dynamic radius
-    velocity_magnitude = np.linalg.norm(sim.robot.velocity)
-    sensing_radius = np.clip(velocity_magnitude * 2.5, 1.5, 4.0)
-    num_people_nearby = 0
-    for person in sim.robot.people:
-        if person.active:
-            dist = np.linalg.norm(person.position - sim.robot.position)
-            if dist <= sensing_radius:
-                num_people_nearby += 1
-    # Normalize by max expected people (e.g., 5)
-    feat.append(float(num_people_nearby) / 5.0)
-    
-    # Forward proxemic cost from costmap (already 0-1)
-    forward_cost = get_forward_proxemic_cost(sim)
-    feat.append(float(forward_cost))
-    
+    feat.extend(list(map(float, nav['waypoint'])))
+    feat.extend(list(map(float, nav['door_position'])))
+    feat.append(float(nav['door_angle']))
+    feat.append(float(nav['linear_velocity']))
+    feat.append(float(nav['angular_velocity']))
+    feat.extend(rel_feats)              # (dx, dy) x 3
+    feat.append(dist_left)
+    feat.append(dist_right)
     return np.asarray(feat, dtype=np.float32)
 
 
@@ -177,258 +195,67 @@ def check_robot_overlap(sim) -> dict:
     }
 
 
-def compute_proxemic_penetration(sim, person) -> float:
-    """
-    Calculate continuous penetration depth into a person's proxemic ellipse.
-    Returns 0.0 if outside, value 0.0-1.0 if inside (normalized by ellipse size).
-    """
-    robot_pos = sim.robot.position
-    robot_radius = sim.robot.radius
-    
-    # Get person's proxemic ellipse parameters
-    axes = getattr(person, 'proxemic_axes', np.array([person.radius, person.radius], dtype=float)).astype(float)
-    a = max(float(axes[0]), 1e-4)  # semi-minor axis
-    b = max(float(axes[1]), 1e-4)  # semi-major axis
-    
-    # Ellipse offset
-    ellipse_offset_ratio = 0.3
-    ellipse_offset = b * ellipse_offset_ratio
-    
-    # Get person heading
-    heading_angle = getattr(person, 'heading_angle', 0.0)
-    
-    # Vector from person to robot
-    rel_x = robot_pos[0] - person.position[0]
-    rel_y = robot_pos[1] - person.position[1]
-    
-    # Rotate into ellipse-aligned frame
-    cos_t = math.cos(heading_angle)
-    sin_t = math.sin(heading_angle)
-    local_x = rel_x * cos_t - rel_y * sin_t
-    local_y = rel_x * sin_t + rel_y * cos_t
-    
-    # Apply offset
-    local_x_shifted = local_x + ellipse_offset
-    
-    # Check position relative to ellipse
-    norm = math.sqrt((local_x_shifted / b) ** 2 + (local_y / a) ** 2)
-    
-    # Calculate distance to ellipse boundary
-    if norm > 1e-6:
-        scale = 1.0 / norm
-        boundary_x_shifted = local_x_shifted * scale
-        boundary_y = local_y * scale
-        boundary_x = boundary_x_shifted - ellipse_offset
-        diff_x = local_x - boundary_x
-        diff_y = local_y - boundary_y
-        dist_to_boundary = math.hypot(diff_x, diff_y)
-        if norm < 1.0:
-            dist_to_boundary = -dist_to_boundary
-    else:
-        dist_to_boundary = -min(a, b)
-    
-    # Account for robot radius
-    clearance = dist_to_boundary - robot_radius
-    
-    # Normalize penetration: 0.0 if outside, increases as robot goes deeper
-    if clearance >= 0:
-        return 0.0
-    else:
-        # Normalize by ellipse size
-        penetration = -clearance / max(a, b)
-        return min(penetration, 1.0)
-
-
-def compute_door_penetration(sim) -> float:
-    """
-    Calculate continuous penetration into door halo.
-    Returns 0.0 if outside, value 0.0-1.0 if inside (normalized).
-    """
-    robot_pos = sim.robot.position
-    robot_radius = sim.robot.radius
-    
-    if not hasattr(sim.robot, 'door_position') or not hasattr(sim.robot, 'corridor_bounds'):
-        return 0.0
-    
-    door_pos = np.array(sim.robot.door_position, dtype=float)
-    bounds = sim.robot.corridor_bounds
-    
-    # Door halo radius
-    door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
-    
-    # Distance from robot to door
-    dist_to_door = np.linalg.norm(robot_pos - door_pos)
-    
-    # Determine door side and inward normal
-    corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
-    door_side = "left" if door_pos[1] < corridor_mid_y else "right"
-    n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
-    
-    # Vector from door to robot
-    v_x = robot_pos[0] - door_pos[0]
-    v_y = robot_pos[1] - door_pos[1]
-    
-    # Check if on inward-facing side
-    dot_product = n_world[0] * v_x + n_world[1] * v_y
-    
-    if dot_product <= 0.0:
-        return 0.0  # Outside semicircle
-    
-    # Calculate penetration
-    clearance = dist_to_door - robot_radius - door_inflation_radius
-    
-    if clearance >= 0:
-        return 0.0
-    else:
-        # Normalize by halo radius
-        penetration = -clearance / door_inflation_radius
-        return min(penetration, 1.0)
-
-
-def get_forward_proxemic_cost(sim) -> float:
-    """
-    Extract average costmap value in forward-looking region.
-    Returns normalized value 0.0-1.0.
-    """
-    costmap = sim.robot.get_egocentric_costmap(size=4.0, resolution=0.1)
-    grid_size = costmap.shape[0]
-    
-    # Forward region: front quarter of costmap
-    # Costmap is robot-centric with robot at center
-    center = grid_size // 2
-    quarter = grid_size // 4
-    
-    # Extract front quarter (ahead of robot)
-    forward_region = costmap[center-quarter:center+quarter, center:]
-    
-    # Compute mean and normalize to 0-1
-    if forward_region.size > 0:
-        mean_cost = np.mean(forward_region) / 255.0
-        return float(mean_cost)
-    else:
-        return 0.0
-
-
 def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
     """
-    Reward based on progress, continuous proxemic penetration, and goal achievement.
+    Reward based on progress, overlap avoidance, and goal achievement.
     Returns (reward, new_progress_distance, info)
     """
     robot_pos = sim.robot.position
     goal_pos = sim.robot.goal
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
-    # Progress reward: scaled up to be more significant
-    progress = (progress_prev_dist - dist)
-    reward = 5.0 * progress  # Increased from 1.0 to make progress more rewarding
+    progress = (progress_prev_dist - dist)  # positive if moving towards goal
+    reward = 1.0 * progress
 
-    # Compute continuous person proxemic penetration
-    max_penetration = 0.0
-    for person in sim.robot.people:
-        if not person.active:
-            continue
-        penetration = compute_proxemic_penetration(sim, person)
-        max_penetration = max(max_penetration, penetration)
+    # Check overlap with inflation zones
+    overlap_info = check_robot_overlap(sim)
     
-    # Graduated penalty for person proxemics (exponential) - reduced magnitude
-    if max_penetration > 0.0:
-        reward += -1.0 * (max_penetration ** 1.5)  # Reduced from -2.0
-    else:
-        # Small bonus for staying in free space
-        reward += 0.05  # Reduced from 0.2 to avoid inflating rewards
-    
-    # Compute continuous door penetration
-    door_penetration = compute_door_penetration(sim)
-    
-    # Graduated penalty for door (exponential) - reduced
-    if door_penetration > 0.0:
-        reward += -0.5 * (door_penetration ** 1.5)  # Reduced from -1.0
+    # Reward/penalty based on overlap type
+    overlap_type = overlap_info['overlap_type']
+    if overlap_type == 'none':
+        # Positive reward for staying in free space
+        reward += 0.2
+    elif overlap_type == 'person':
+        # Penalty for being in person's proxemic zone
+        reward += -0.5
+    elif overlap_type == 'door':
+        # Penalty for being in door's inflation zone
+        reward += -0.3
+    elif overlap_type == 'both':
+        # Higher penalty for being in both zones
+        reward += -0.8
 
-    # Reduced time penalty to not dominate the reward signal
-    reward += -0.001  # Reduced from -0.005
+    # time penalty (encourage faster navigation)
+    reward += -0.005
 
-    # Collision penalty - reduced to be less catastrophic
+    # collision penalty (count increment since last step)
     collisions = sim.collision_count
     info = {
         'distance': dist,
         'collisions': collisions,
-        'max_person_penetration': max_penetration,
-        'door_penetration': door_penetration,
+        'overlap_type': overlap_type,
+        'person_overlap': overlap_info['person_overlap'],
+        'door_overlap': overlap_info['door_overlap'],
     }
     # If a collision occurred in this step (heuristic: last history item within ~0.2s)
     if sim.collision_history:
         if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -2.0  # Reduced from -5.0
+            reward += -5.5
 
-    # Graduated goal proximity reward to guide the agent
+    # goal bonus
     if dist < 1.0:
-        reward += 50.0  # Increased from 25.0 - major success!
-    elif dist < 2.0:
-        reward += 10.0  # New: intermediate reward for getting close
-    elif dist < 3.0:
-        reward += 5.0   # New: smaller reward for approaching
-    
-    # Additional penalty for moving away from goal (negative progress)
-    if progress < -0.1:
-        reward += -1.0
+        reward += 25.0
 
     return reward, dist, info
 
 
-def plot_training_results(episode_returns: list, episodes: int):
-    """
-    Plot cumulative rewards vs episode number with smoothed average.
-    
-    Args:
-        episode_returns: List of cumulative rewards per episode
-        episodes: Total number of episodes
-    """
-    # Create figure
-    plt.figure(figsize=(12, 6))
-    
-    # Episode numbers
-    episode_nums = np.arange(1, len(episode_returns) + 1)
-    
-    # Plot raw episode returns
-    plt.plot(episode_nums, episode_returns, alpha=0.3, color='blue', linewidth=1, label='Episode Return')
-    
-    # Compute moving average for smoothing
-    window_size = min(20, len(episode_returns) // 5)  # Use 20 episodes or 1/5 of total, whichever is smaller
-    if window_size < 1:
-        window_size = 1
-    
-    moving_avg = []
-    for i in range(len(episode_returns)):
-        start_idx = max(0, i - window_size + 1)
-        window = episode_returns[start_idx:i+1]
-        moving_avg.append(np.mean(window))
-    
-    # Plot smoothed average
-    plt.plot(episode_nums, moving_avg, color='red', linewidth=2, label=f'Moving Average (window={window_size})')
-    
-    # Add labels and formatting
-    plt.xlabel('Episode', fontsize=12)
-    plt.ylabel('Cumulative Reward', fontsize=12)
-    plt.title('Training Progress: Cumulative Reward vs Episode', fontsize=14, fontweight='bold')
-    plt.legend(loc='best', fontsize=10)
-    plt.grid(True, alpha=0.3)
-    
-    # Save plot
-    os.makedirs('checkpoints', exist_ok=True)
-    plot_path = os.path.join('checkpoints', 'training_progress.png')
-    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-    print(f"Training plot saved to {plot_path}")
-    
-    # Display plot
-    plt.tight_layout()
-    plt.show()
-
-
-def main():
-    seed = 42
+def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str] = None) -> float:
+    seed = int(config.get('seed', 42))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Discrete theta_range actions (keep tiny and intuitive)
     theta_actions = np.array([
@@ -439,20 +266,46 @@ def main():
     ], dtype=np.float32)
     num_actions = len(theta_actions)
 
-    # Q-network
-    input_dim = 10  # features extracted above (8 original + num_people_nearby + forward_proxemic_cost)
-    qnet = ThetaQNet(input_dim, num_actions)
-    target_qnet = ThetaQNet(input_dim, num_actions)
-    target_qnet.load_state_dict(qnet.state_dict())
-    optimizer = optim.Adam(qnet.parameters(), lr=5e-5)  # Reduced from 1e-3 for stability
+    # Environment / training hyperparameters
+    gamma = float(config.get('gamma', 0.99))
+    tau = float(config.get('tau', 0.01))
+    epsilon_start = float(config.get('epsilon_start', 1.0))
+    epsilon_end = float(config.get('epsilon_end', 0.05))
+    epsilon_decay_steps = int(config.get('epsilon_decay_steps', 10_000))
+    batch_size = int(config.get('batch_size', 64))
+    buffer_capacity = int(config.get('buffer_capacity', 50_000))
+    buffer = deque(maxlen=buffer_capacity)
 
-    gamma = 0.99
-    tau = 0.01
-    epsilon_start = 1.0
-    epsilon_end = 0.05
-    epsilon_decay_steps = 100_000  # Increased from 10k to allow more exploration
-    batch_size = 64
-    buffer = deque(maxlen=50_000)
+    # Env defaults (also used to infer feature dimension)
+    dt = float(config.get('dt', 1/60.0))
+    corridor_width = float(config.get('corridor_width', 4.0))
+    door_side = str(config.get('door_side', 'right'))
+    num_people = int(config.get('num_people', 3))
+    people_speed_min = float(config.get('people_speed_min', 0.6))
+    people_speed_max = float(config.get('people_speed_max', 1.2))
+
+    # Infer input feature dimension using a temporary simulation
+    tmp_sim = Simulation(
+        corridor_width=corridor_width,
+        door_side=door_side,
+        num_people=num_people,
+        people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
+    )
+    _ = tmp_sim.step(dt)
+    input_dim = int(len(extract_nav_features(tmp_sim)))
+
+    # Q-network
+    hidden_size = int(config.get('hidden_size', 128))
+    qnet = ThetaQNet(input_dim, num_actions, hidden=hidden_size).to(device)
+    target_qnet = ThetaQNet(input_dim, num_actions, hidden=hidden_size).to(device)
+    target_qnet.load_state_dict(qnet.state_dict())
+    learning_rate = float(config.get('learning_rate', 1e-3))
+    optimizer = optim.Adam(qnet.parameters(), lr=learning_rate)
+
+    if use_wandb and wandb is not None:
+        wandb.init(project=str(config.get('wandb_project', 'PredictiveDWA')),
+                   name=run_name, config=config, allow_val_change=True)
+        wandb.watch(qnet, log='all', log_freq=200)
 
     def epsilon_by_step(step):
         if step >= epsilon_decay_steps:
@@ -463,52 +316,54 @@ def main():
         if random.random() < eps:
             return random.randrange(num_actions)
         with torch.no_grad():
-            s = torch.from_numpy(state_feat).unsqueeze(0)
+            s = torch.from_numpy(state_feat).unsqueeze(0).to(device)
             q = qnet(s)
             return int(q.argmax(dim=1).item())
 
     def soft_update():
         with torch.no_grad():
-            for tp, p in zip(target_qnet.parameters(), qnet.parameters()):
-                tp.data.mul_(1 - tau).add_(tau * p.data)
+            for target_param, param in zip(target_qnet.parameters(), qnet.parameters()):
+                target_param.data.mul_(1 - tau).add_(tau * param.data)
 
-    def optimize():
+    def optimize_step():
         if len(buffer) < batch_size:
             return {}
         batch = random.sample(buffer, batch_size)
-        s = torch.tensor(np.stack([b[0] for b in batch], axis=0), dtype=torch.float32)
-        a = torch.tensor([b[1] for b in batch], dtype=torch.long).unsqueeze(1)
-        r = torch.tensor([b[2] for b in batch], dtype=torch.float32).unsqueeze(1)
-        s2 = torch.tensor(np.stack([b[3] for b in batch], axis=0), dtype=torch.float32)
-        d = torch.tensor([b[4] for b in batch], dtype=torch.float32).unsqueeze(1)
+        states = torch.tensor(np.stack([b[0] for b in batch], axis=0), dtype=torch.float32, device=device)
+        actions = torch.tensor([b[1] for b in batch], dtype=torch.long, device=device).unsqueeze(1)
+        rewards = torch.tensor([b[2] for b in batch], dtype=torch.float32, device=device).unsqueeze(1)
+        next_states = torch.tensor(np.stack([b[3] for b in batch], axis=0), dtype=torch.float32, device=device)
+        dones = torch.tensor([b[4] for b in batch], dtype=torch.float32, device=device).unsqueeze(1)
 
         # Q(s,a)
-        q = qnet(s).gather(1, a)
+        q_values = qnet(states).gather(1, actions)
         # target: r + gamma * max_a' Q_target(s', a') * (1 - done)
         with torch.no_grad():
-            q2 = target_qnet(s2).max(dim=1, keepdim=True)[0]
-            target = r + (1.0 - d) * gamma * q2
+            next_max_q = target_qnet(next_states).max(dim=1, keepdim=True)[0]
+            target_q = rewards + (1.0 - dones) * gamma * next_max_q
 
-        loss = nn.functional.mse_loss(q, target)
+        loss = nn.functional.mse_loss(q_values, target_q)
         optimizer.zero_grad()
         loss.backward()
-        # Gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(qnet.parameters(), max_norm=10.0)
         optimizer.step()
         soft_update()
         return {'loss': float(loss.item())}
 
     # Training loop (episodes of the headless simulation)
-    episodes = 80
-    max_steps = 800
-    dt = 1/60.0
+    episodes = int(config.get('episodes', 50))
+    max_steps = int(config.get('max_steps', 800))
+
     global_step = 0
-    episode_returns = []  # Track cumulative rewards for plotting
-    warmup_steps = 1000  # Fill buffer before training starts
+    returns = []
+    start_time = time.time()
 
     for ep in range(episodes):
-        sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
-                         people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)])
+        sim = Simulation(
+            corridor_width=corridor_width,
+            door_side=door_side,
+            num_people=num_people,
+            people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
+        )
 
         # Reset progress tracker
         _, _, _ = sim.step(dt)  # advance once to initialize internal state
@@ -517,13 +372,12 @@ def main():
         prev_dist = float(np.linalg.norm(goal_pos - robot_pos))
 
         episode_return = 0.0
-        done = False
-        max_person_pen = 0.0
-        max_door_pen = 0.0
-        
+        overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
+
         for t in range(max_steps):
             # Build state features
             state_feat = extract_nav_features(sim)
+            #print(f"state_feat: {state_feat}")
 
             # Epsilon-greedy pick of theta_range
             eps = epsilon_by_step(global_step)
@@ -535,74 +389,151 @@ def main():
                 sim.robot.nav.theta_range = theta_val
 
             # Step simulation
-            next_state, _, done_flag = sim.step(dt)
+            _, _, done_flag = sim.step(dt)
 
             # Reward
             reward, prev_dist, info = compute_reward(sim, prev_dist)
-            
-            # Clip reward to prevent extreme outliers from destabilizing learning
-            reward_clipped = np.clip(reward, -10.0, 50.0)
-            episode_return += reward  # Track unclipped for monitoring
-            
-            # Track max penetration values
-            max_person_pen = max(max_person_pen, info['max_person_penetration'])
-            max_door_pen = max(max_door_pen, info['door_penetration'])
+            episode_return += reward
+
+            # Track overlap statistics
+            overlap_counts[info['overlap_type']] += 1
 
             # Next features
             next_feat = extract_nav_features(sim)
 
-            # Store transition with clipped reward
-            buffer.append((state_feat, action_idx, reward_clipped, next_feat, float(done_flag)))
+            # Store transition
+            buffer.append((state_feat, action_idx, reward, next_feat, float(done_flag)))
 
-            # Learn (only after warmup period)
-            if global_step >= warmup_steps:
-                metrics = optimize()
-            else:
-                metrics = {}
+            # Learn
+            metrics = optimize_step()
 
             global_step += 1
             if done_flag:
                 break
 
-        # Print episode summary
+        # Episode metrics
         total_steps = t + 1
-        print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps} | Eps: {eps:.2f}")
-        print(f"  Max Penetrations - Person: {max_person_pen:.3f} | Door: {max_door_pen:.3f}")
-        
-        # Store episode return for plotting
-        episode_returns.append(episode_return)
+        overlap_pct = {k: 100 * v / total_steps for k, v in overlap_counts.items()}
+        returns.append(episode_return)
 
-    # Plot training progress
-    print("\nGenerating training plots...")
-    plot_training_results(episode_returns, episodes)
+        print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps} | Eps: {eps:.2f}")
+        print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
+
+        if use_wandb and wandb is not None:
+            wandb.log({
+                'episode': ep + 1,
+                'return': episode_return,
+                'steps': total_steps,
+                'epsilon': eps,
+                'overlap_free_pct': overlap_pct['none'],
+                'overlap_person_pct': overlap_pct['person'],
+                'overlap_door_pct': overlap_pct['door'],
+                'overlap_both_pct': overlap_pct['both'],
+                'elapsed_min': (time.time() - start_time) / 60.0,
+            })
+
+    avg_return = float(np.mean(returns)) if returns else 0.0
 
     # Save network
     os.makedirs('checkpoints', exist_ok=True)
     torch.save(qnet.state_dict(), os.path.join('checkpoints', 'theta_qnet.pt'))
     print('Saved model to checkpoints/theta_qnet.pt')
-    
-    # Save hyperparameters
-    hyperparams = {
-        'learning_rate': 5e-5,
-        'gamma': gamma,
-        'tau': tau,
-        'epsilon_start': epsilon_start,
-        'epsilon_end': epsilon_end,
-        'epsilon_decay_steps': epsilon_decay_steps,
-        'batch_size': batch_size,
-        'buffer_size': 50_000,
-        'hidden_dim': 256,
-        'episodes': episodes,
-        'max_steps_per_episode': max_steps,
-        'warmup_steps': warmup_steps,
-        'reward_clip_range': [-10.0, 50.0],
-        'gradient_clip_norm': 10.0,
-        'theta_actions_degrees': [10, 20, 30, 45],
-        'feature_normalization': True,
+
+    if use_wandb and wandb is not None:
+        wandb.summary['avg_return'] = avg_return
+        wandb.finish()
+
+    return avg_return
+
+
+def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) -> None:
+    if optuna is None:
+        raise RuntimeError("Optuna is not installed. Please install optuna to use hyperparameter search.")
+
+    def objective(trial: 'optuna.trial.Trial') -> float:
+        # Suggest hyperparameters
+        config = dict(base_config)
+        config.update({
+            'learning_rate': trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True),
+            'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256, 384]),
+            'gamma': trial.suggest_float('gamma', 0.90, 0.999),
+            'tau': trial.suggest_float('tau', 0.001, 0.05, log=True),
+            'epsilon_decay_steps': trial.suggest_int('epsilon_decay_steps', 2_000, 30_000, step=1000),
+            'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
+        })
+        # Shorter training for objective
+        config['episodes'] = int(base_config.get('optuna_episodes', 12))
+        avg_return = train(config, use_wandb=bool(base_config.get('wandb_during_optuna', False)),
+                           run_name=f"optuna_trial_{trial.number}")
+        # We want to maximize avg_return
+        return avg_return
+
+    storage = None  # In-memory; customize with SQLite if desired
+    study = optuna.create_study(direction='maximize', study_name=study_name, storage=storage)
+    study.optimize(objective, n_trials=num_trials, gc_after_trial=True)
+
+    print("Best trial:")
+    print(f"  value: {study.best_trial.value}")
+    print("  params:")
+    for k, v in study.best_trial.params.items():
+        print(f"    {k}: {v}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Train ThetaQNet with optional W&B logging and Optuna tuning')
+    parser.add_argument('--episodes', type=int, default=50)
+    parser.add_argument('--max-steps', type=int, default=800)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--hidden', type=int, default=128)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--tau', type=float, default=0.01)
+    parser.add_argument('--eps-decay-steps', type=int, default=10_000)
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--buffer', type=int, default=50_000)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--use-wandb', action='store_true')
+    parser.add_argument('--wandb-project', type=str, default='PredictiveDWA')
+    # Optuna options
+    parser.add_argument('--optuna-trials', type=int, default=0)
+    parser.add_argument('--optuna-study', type=str, default='theta_qnet_study')
+    parser.add_argument('--optuna-episodes', type=int, default=12)
+    parser.add_argument('--wandb-during-optuna', action='store_true')
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    base_config: Dict[str, Any] = {
+        'episodes': args.episodes,
+        'max_steps': args.max_steps,
+        'learning_rate': args.lr,
+        'hidden_size': args.hidden,
+        'gamma': args.gamma,
+        'tau': args.tau,
+        'epsilon_start': 1.0,
+        'epsilon_end': 0.05,
+        'epsilon_decay_steps': args.eps_decay_steps,
+        'batch_size': args.batch_size,
+        'buffer_capacity': args.buffer,
+        'seed': args.seed,
+        'wandb_project': args.wandb_project,
+        # Env defaults
+        'dt': 1/60.0,
+        'corridor_width': 4.0,
+        'door_side': 'right',
+        'num_people': 3,
+        'people_speed_min': 0.6,
+        'people_speed_max': 1.2,
+        # Optuna-specific
+        'optuna_episodes': args.optuna_episodes,
+        'wandb_during_optuna': args.wandb_during_optuna,
     }
-    with open(os.path.join('checkpoints', 'hyperparameters.json'), 'w') as f:
-        json.dump(hyperparams, f, indent=2)
-    print('Saved hyperparameters to checkpoints/hyperparameters.json')
+
+    if args.optuna_trials and args.optuna_trials > 0:
+        run_optuna(args.optuna_study, args.optuna_trials, base_config)
+    else:
+        train(base_config, use_wandb=args.use_wandb)
 
 
 if __name__ == '__main__':
