@@ -555,7 +555,6 @@ class TSDWA:
             return 0.5 + t * (5.0 - 0.5)
         alpha_param = to_beta_param(lw)
         beta_param = to_beta_param(rw)
-        print(f"alpha_param: {alpha_param}, beta_param: {beta_param}")
 
         # Threshold-based selection: keep u where pdf >= 0.5 * max(pdf) over u in [0.01, 0.99]
         n = max(1, int(n_samples))
