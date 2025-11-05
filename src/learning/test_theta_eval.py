@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
-from learning.rl_theta_net import ThetaQNet
+from models.rl_theta_net import ThetaQNet
 
 
 def get_forward_proxemic_cost(sim) -> float:

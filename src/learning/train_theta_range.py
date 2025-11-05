@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 # Local imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
-from learning.rl_theta_net import ThetaQNet
+from models.rl_theta_net import ThetaQNet
 
 
 def extract_nav_features(sim) -> np.ndarray:
