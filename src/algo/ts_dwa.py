@@ -60,8 +60,9 @@ class TSDWA:
         alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
         sampling_strategy: str = "beta",  # Strategy: "uniform", "power", "gaussian", "beta"
-        left_weight: float = 10,       # Sampling density weight for left side
-        right_weight: float = 2,      # Sampling density weight for right side
+        left_weight: float = 2,       # Sampling density weight for left side
+        right_weight: float = 10,      # Sampling density weight for right side
+        verbose: bool = False,          # Enable debug printing
     ) -> None:
         # Save parameters identical to the original DWA planner ------------------
         self.position = position
@@ -86,6 +87,7 @@ class TSDWA:
         self.sampling_strategy = sampling_strategy
         self.left_weight = left_weight
         self.right_weight = right_weight
+        self.verbose = verbose
 
         # Dynamics / limits replicate original values so scoring remains valid ----
         self.max_rotation = math.pi
@@ -136,8 +138,9 @@ class TSDWA:
         dw = self._dynamic_window()
         
         # Debug: Print DW range and current state
-        print(f"\n=== Timestep ===")
-        print(f"DW: v=[{dw[0]:5.2f}, {dw[1]:5.2f}], ω=[{dw[2]:6.3f}, {dw[3]:6.3f}] | Current: v={self.v:5.3f}, ω={self.w:6.3f}")
+        if self.verbose:
+            print(f"\n=== Timestep ===")
+            print(f"DW: v=[{dw[0]:5.2f}, {dw[1]:5.2f}], ω=[{dw[2]:6.3f}, {dw[3]:6.3f}] | Current: v={self.v:5.3f}, ω={self.w:6.3f}")
 
         # ------------------------------------------------------------------
         # 2. Extract path heading θ_ph and curvature κ                    
@@ -177,10 +180,11 @@ class TSDWA:
         self.v, self.w = best_v, best_w
         
         # Debug: Print trajectory selection info
-        omega_samples = [w for v, w in samples]
-        print(f"θ_ph={theta_ph:6.3f} | Selected: v={best_v:5.3f}, ω={best_w:6.3f} | "
-              f"ω range=[{min(omega_samples):6.3f}, {max(omega_samples):6.3f}] | "
-              f"ω mean={np.mean(omega_samples):6.3f}, median={np.median(omega_samples):6.3f}")
+        if self.verbose:
+            omega_samples = [w for v, w in samples]
+            print(f"θ_ph={theta_ph:6.3f} | Selected: v={best_v:5.3f}, ω={best_w:6.3f} | "
+                  f"ω range=[{min(omega_samples):6.3f}, {max(omega_samples):6.3f}] | "
+                  f"ω mean={np.mean(omega_samples):6.3f}, median={np.median(omega_samples):6.3f}")
         
         self.orientation = getattr(self, "orientation", 0.0) + self.w * dt
         self.orientation = self._normalize_angle(self.orientation)
@@ -221,7 +225,7 @@ class TSDWA:
         elif self.sampling_strategy == "gaussian":
             return self._gaussian_sampling(theta_ph, theta_range, n_samples)
         elif self.sampling_strategy == "beta":
-            return self._beta_sampling(theta_ph, theta_range, n_samples)
+            return self._beta_sampling_v0(theta_ph, theta_range, n_samples)
         else:
             raise ValueError(
                 f"Unknown sampling_strategy '{self.sampling_strategy}'. "
@@ -414,10 +418,11 @@ class TSDWA:
             from scipy.stats import beta
         except ImportError:
             # Fallback to power-law if scipy not available
-            print(
-                "Warning: scipy not available for beta sampling. "
-                "Falling back to power-law sampling."
-            )
+            if self.verbose:
+                print(
+                    "Warning: scipy not available for beta sampling. "
+                    "Falling back to power-law sampling."
+                )
             return self._power_law_sampling(theta_ph, theta_range, n_samples)
         
         # Map weights to beta distribution parameters
@@ -429,7 +434,8 @@ class TSDWA:
         total_weight = self.left_weight + self.right_weight + 1e-6
         left_norm = self.left_weight / total_weight
         right_norm = self.right_weight / total_weight
-        print(f"left_norm: {left_norm}, right_norm: {right_norm}")
+        if self.verbose:
+            print(f"left_norm: {left_norm}, right_norm: {right_norm}")
         
         # Map to beta parameters (higher weight = higher parameter value)
         # This creates bias towards that side
@@ -519,10 +525,11 @@ class TSDWA:
 
         # Map from [0, 1] to [theta_ph - theta_range, theta_ph + theta_range]
         headings = theta_ph - theta_range + beta_samples * (2 * theta_range)
-        print(f"theta_range: {theta_range}")
-        print(f"beta_samples: {beta_samples}")
-        print(f"headings: {headings}")
-        print(f"theta_ph: {theta_ph}")
+        if self.verbose:
+            print(f"theta_range: {theta_range}")
+            print(f"beta_samples: {beta_samples}")
+            print(f"headings: {headings}")
+            print(f"theta_ph: {theta_ph}")
 
         return headings
 
@@ -536,9 +543,12 @@ class TSDWA:
         the beta distribution's alpha and beta parameters.
         
         Weight interpretation (after scaling):
-        - left_weight > right_weight: More samples on left (alpha > beta)
-        - right_weight > left_weight: More samples on right (alpha < beta)
+        - left_weight > right_weight: More samples on left (alpha < beta)
+        - right_weight > left_weight: More samples on right (alpha > beta)
         - equal weights: Symmetric distribution
+        
+        The parameter range [1.0, 5.0] ensures unimodal distributions suitable
+        for path planning (parameters < 1 create U-shaped distributions).
         
         Requires scipy.stats. 
         
@@ -560,10 +570,10 @@ class TSDWA:
         # Clip weights to [-10, 10]
         lw = float(np.clip(self.left_weight, -10.0, 10.0))
         rw = float(np.clip(self.right_weight, -10.0, 10.0))
-        # Linearly interpolate to [0.5, 5.0]
+        # Linearly interpolate to [1.0, 5.0] to ensure unimodal distributions
         def to_beta_param(x: float) -> float:
             t = (x + 10.0) / 20.0  # map [-10,10] -> [0,1]
-            return 0.5 + t * (5.0 - 0.5)
+            return 1.0 + t * (5.0 - 1.0)  # map [0,1] -> [1.0, 5.0]
         # In Beta(alpha, beta): alpha > beta skews right (towards 1), alpha < beta skews left (towards 0)
         # Since u=0 maps to left and u=1 maps to right, we need right_weight → alpha
         alpha_param = to_beta_param(rw)  # right_weight controls right side (towards u=1)
@@ -572,8 +582,8 @@ class TSDWA:
         # Threshold-based selection: keep u where pdf >= 0.5 * max(pdf) over u in [0.01, 0.99]
         n = max(1, int(n_samples))
         u = np.linspace(0.0, 1.0, 2001)
-        #pdf_vals = beta.pdf(u, alpha_param, beta_param)
-        pdf_vals = beta.pdf(u, rw, lw)
+        # FIX: Use transformed parameters, not raw weights
+        pdf_vals = beta.pdf(u, alpha_param, beta_param)
         inner_mask = (u >= 0.01) & (u <= 0.99)
         max_pdf = float(np.max(pdf_vals[inner_mask])) if np.any(inner_mask) else float(np.max(pdf_vals))
         threshold = 0.5 * max_pdf
@@ -678,8 +688,9 @@ class TSDWA:
         )
         
         # Debug: Print heading distribution
-        print(f"  Headings (relative to θ_ph): min={min(headings - theta_ph):6.3f}, "
-              f"max={max(headings - theta_ph):6.3f}, mean={np.mean(headings - theta_ph):6.3f}")
+        if self.verbose:
+            print(f"  Headings (relative to θ_ph): min={min(headings - theta_ph):6.3f}, "
+                  f"max={max(headings - theta_ph):6.3f}, mean={np.mean(headings - theta_ph):6.3f}")
         
         speeds = np.linspace(self.max_speed * 0.1, self.max_speed, self.n_speed)
 
