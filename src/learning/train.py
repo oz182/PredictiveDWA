@@ -27,6 +27,7 @@ def extract_nav_features(sim) -> np.ndarray:
     """
     Feature vector from current simulation state.
     Includes:
+      - goal_angle(1), goal_distance(1) - CRITICAL for navigation
       - waypoint(2), door_position(2), door_angle(1)
       - linear_velocity(1), angular_velocity(1)
       - three closest people relative positions wrt robot: [(dx, dy) x 3] (pad with large value if <3)
@@ -35,18 +36,38 @@ def extract_nav_features(sim) -> np.ndarray:
     nav = sim.robot.get_navigation_info(2)
 
     robot_pos = np.asarray(sim.robot.position, dtype=float)
-    large_val = 10
+    robot_orientation = float(getattr(sim.robot, 'orientation', 0.0))
+    goal_pos = np.asarray(sim.robot.goal, dtype=float)
+    large_val = 10.0
 
-    # Compute three closest people relative positions (dx, dy)
+    # Goal direction in robot frame (CRITICAL for agent to know where to go!)
+    goal_vec = goal_pos - robot_pos
+    goal_angle_world = math.atan2(goal_vec[1], goal_vec[0])
+    goal_angle_robot = goal_angle_world - robot_orientation
+    # Normalize to [-π, π]
+    while goal_angle_robot > math.pi:
+        goal_angle_robot -= 2 * math.pi
+    while goal_angle_robot < -math.pi:
+        goal_angle_robot += 2 * math.pi
+    goal_dist = float(np.linalg.norm(goal_vec))
+
+    # Compute three closest people relative positions (dx, dy) in robot frame
     rel_people: list[tuple[float, float, float]] = []  # (dist, dx, dy)
     if hasattr(sim.robot, 'people'):
         for person in sim.robot.people:
             if getattr(person, 'active', True):
                 p = np.asarray(person.position, dtype=float)
-                dx = float(p[0] - robot_pos[0])
-                dy = float(p[1] - robot_pos[1])
-                d = math.hypot(dx, dy)
-                rel_people.append((d, dx, dy))
+                # Transform to robot frame
+                rel_x = p[0] - robot_pos[0]
+                rel_y = p[1] - robot_pos[1]
+                # Rotate into robot's reference frame
+                cos_theta = math.cos(-robot_orientation)
+                sin_theta = math.sin(-robot_orientation)
+                rel_x_robot = rel_x * cos_theta - rel_y * sin_theta
+                rel_y_robot = rel_x * sin_theta + rel_y * cos_theta
+                d = math.hypot(rel_x_robot, rel_y_robot)
+                rel_people.append((d, rel_x_robot, rel_y_robot))
+    
     rel_people.sort(key=lambda t: t[0])
     # Take up to 3, pad if fewer
     rel_feats: list[float] = []
@@ -69,12 +90,16 @@ def extract_nav_features(sim) -> np.ndarray:
         dist_right = max(0.0, y_max - y)
 
     feat = []
+    # Add goal information first (most important!)
+    feat.append(float(goal_angle_robot))
+    feat.append(float(goal_dist))
+    # Rest of features
     feat.extend(list(map(float, nav['waypoint'])))
     feat.extend(list(map(float, nav['door_position'])))
     feat.append(float(nav['door_angle']))
     feat.append(float(nav['linear_velocity']))
     feat.append(float(nav['angular_velocity']))
-    feat.extend(rel_feats)              # (dx, dy) x 3
+    feat.extend(rel_feats)              # (dx, dy) x 3 in robot frame
     feat.append(dist_left)
     feat.append(dist_right)
     return np.asarray(feat, dtype=np.float32)
@@ -194,40 +219,55 @@ def check_robot_overlap(sim) -> dict:
     }
 
 
-def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
+def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple[float, float, dict]:
     """
-    Reward based on progress, overlap avoidance, and goal achievement.
+    Reward focused on obstacle avoidance with better credit assignment.
+    
+    Key improvements:
+    1. Progress component (small) to ensure episodes complete
+    2. Obstacle-based rewards (primary signal)
+    3. Offset regularization to encourage meaningful corrections
+    
     Returns (reward, new_progress_distance, info)
     """
     robot_pos = sim.robot.position
     goal_pos = sim.robot.goal
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
-    progress = (progress_prev_dist - dist)  # positive if moving towards goal
-    reward = 1.0 * progress
-
+    # Small progress component to ensure goal-reaching behavior
+    # Path handles this mostly, but agent needs SOME signal episodes should end
+    progress = (progress_prev_dist - dist)
+    reward = 0.5 * progress  # Reduced from 1.0 - not primary objective
+    
     # Check overlap with inflation zones
     overlap_info = check_robot_overlap(sim)
     
-    # Reward/penalty based on overlap type
+    # PRIMARY SIGNAL: Obstacle-based rewards
     overlap_type = overlap_info['overlap_type']
     if overlap_type == 'none':
         # Positive reward for staying in free space
-        reward += 0.2
+        reward += 0.5
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        reward += -0.5
+        reward += -2.0  # Increased penalty to make signal stronger
     elif overlap_type == 'door':
         # Penalty for being in door's inflation zone
-        reward += -0.3
+        reward += -1.0  # Increased penalty
     elif overlap_type == 'both':
         # Higher penalty for being in both zones
-        reward += -0.8
+        reward += -3.0  # Increased penalty
+    else:
+        reward += 0.0
 
-    # time penalty (encourage faster navigation)
-    reward += -0.005
+    # Offset regularization: Encourage agent to use offsets purposefully
+    # Small offset when safe, larger offset when avoiding obstacles
+    offset_penalty = 0.1 * abs(offset)
+    reward -= offset_penalty
 
-    # collision penalty (count increment since last step)
+    # Small time penalty to encourage efficiency
+    reward -= 0.01
+
+    # Hard collision penalty (critical - must avoid)
     collisions = sim.collision_count
     info = {
         'distance': dist,
@@ -235,15 +275,18 @@ def compute_reward(sim, progress_prev_dist: float) -> tuple[float, float, dict]:
         'overlap_type': overlap_type,
         'person_overlap': overlap_info['person_overlap'],
         'door_overlap': overlap_info['door_overlap'],
+        'offset': offset,
+        'offset_abs': abs(offset),
     }
-    # If a collision occurred in this step (heuristic: last history item within ~0.2s)
+    
+    # If a collision occurred in this step
     if sim.collision_history:
         if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -5.5
-
-    # goal bonus
+            reward += -10.0  # Large penalty for actual collision
+    
+    # Goal bonus to ensure episodes terminate successfully
     if dist < 1.0:
-        reward += 25.0
+        reward += 20.0
 
     return reward, dist, info
 
@@ -256,8 +299,8 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # alpha and beta for beta sampling
-    num_actions = 2
+    # Action space: single offset value for heading adjustment
+    num_actions = 1
 
     # Environment / training hyperparameters (algorithm-agnostic where possible)
     gamma = float(config.get('gamma', 0.99))
@@ -338,27 +381,27 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
         episode_return = 0.0
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
+        offset_history = []  # Track offsets for analysis
 
         # Storage for action repetition
-        prev_action_tuple = None  # (left_weight, right_weight)
+        prev_offset = None
 
         for t in range(max_steps):
             # Build state features
             state_feat = extract_nav_features(sim)
-            #print(f"state_feat: {state_feat}")
 
             # Decide whether to sample a new action or reuse previous one
-            if (t % action_select_interval == 0) or (prev_action_tuple is None):
+            if (t % action_select_interval == 0) or (prev_offset is None):
                 # Sample new action via policy (also records state/action/logprob/value in buffer)
-                left_weight, right_weight = agent.select_action(state_feat)
-                prev_action_tuple = (float(left_weight), float(right_weight))
+                offset_normalized = agent.select_action(state_feat)  # Returns array
+                prev_offset = float(offset_normalized[0])
             else:
                 # Reuse previous action but still log this step into PPO buffer
-                left_weight, right_weight = prev_action_tuple
+                offset_normalized_value = prev_offset
                 policy_device = next(agent.policy.parameters()).device
                 state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
                 state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
-                action_tensor_batch = torch.tensor([[left_weight, right_weight]], dtype=torch.float32, device=policy_device)
+                action_tensor_batch = torch.tensor([[offset_normalized_value]], dtype=torch.float32, device=policy_device)
                 with torch.no_grad():
                     old_logprob, state_value, _ = agent.policy.evaluate(state_tensor_batch, action_tensor_batch)
                 # Match shapes used by select_action: state (no batch), action ([1, action_dim])
@@ -367,15 +410,19 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 agent.buffer.logprobs.append(old_logprob.detach())
                 agent.buffer.state_values.append(state_value.squeeze(0).detach())
 
-            # Set left_weight, right_weight in the planner
-            sim.robot.nav.left_weight = left_weight
-            sim.robot.nav.right_weight = right_weight
+            # Scale offset from [-1, 1] to [-π/6, π/6] (±30 degrees)
+            max_offset = math.pi / 3  # 60 degrees
+            offset = prev_offset * max_offset
+            
+            # Set offset in the planner (agent's correction to path heading)
+            sim.robot.nav.agent_offset = offset
+            offset_history.append(abs(offset))
 
             # Step simulation
             _, _, done_flag = sim.step(dt)
 
-            # Reward
-            reward, prev_dist, info = compute_reward(sim, prev_dist)
+            # Reward (pass offset for regularization)
+            reward, prev_dist, info = compute_reward(sim, prev_dist, offset)
             episode_return += reward
 
             # Track overlap statistics
@@ -400,9 +447,16 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         total_steps = t + 1
         overlap_pct = {k: 100 * v / total_steps for k, v in overlap_counts.items()}
         returns.append(episode_return)
+        
+        # Offset statistics
+        avg_abs_offset = np.mean(offset_history) if offset_history else 0.0
+        max_abs_offset = np.max(offset_history) if offset_history else 0.0
+        avg_abs_offset_deg = avg_abs_offset * 180 / math.pi
+        max_abs_offset_deg = max_abs_offset * 180 / math.pi
 
         print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
+        print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±30°)")
 
         if use_wandb and wandb is not None:
             wandb.log({
@@ -413,6 +467,8 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'overlap_person_pct': overlap_pct['person'],
                 'overlap_door_pct': overlap_pct['door'],
                 'overlap_both_pct': overlap_pct['both'],
+                'avg_abs_offset_deg': avg_abs_offset_deg,
+                'max_abs_offset_deg': max_abs_offset_deg,
                 'elapsed_min': (time.time() - start_time) / 60.0,
             })
 

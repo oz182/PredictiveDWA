@@ -143,9 +143,13 @@ class TSDWA:
             print(f"DW: v=[{dw[0]:5.2f}, {dw[1]:5.2f}], ω=[{dw[2]:6.3f}, {dw[3]:6.3f}] | Current: v={self.v:5.3f}, ω={self.w:6.3f}")
 
         # ------------------------------------------------------------------
-        # 2. Extract path heading θ_ph and curvature κ                    
-        theta_ph = self._extract_heading(global_path)
-        kappa = self._extract_curvature(global_path)
+        # 2. Extract path heading θ_ph as baseline, add agent offset
+        theta_ph_path = self._extract_heading(global_path)
+        agent_offset = getattr(self, 'agent_offset', 0.0)  # Agent's correction
+        theta_ph = theta_ph_path + agent_offset  # Combined heading
+        
+        # Set curvature to 0 (agent controls direction via offset)
+        kappa = 0.0
 
         # ------------------------------------------------------------------
         # 3. Generate *targeted* samples biased along the global path
@@ -182,9 +186,9 @@ class TSDWA:
         # Debug: Print trajectory selection info
         if self.verbose:
             omega_samples = [w for v, w in samples]
-            print(f"θ_ph={theta_ph:6.3f} | Selected: v={best_v:5.3f}, ω={best_w:6.3f} | "
-                  f"ω range=[{min(omega_samples):6.3f}, {max(omega_samples):6.3f}] | "
-                  f"ω mean={np.mean(omega_samples):6.3f}, median={np.median(omega_samples):6.3f}")
+            print(f"θ_ph_path={theta_ph_path:6.3f}, offset={agent_offset:6.3f}, θ_ph_final={theta_ph:6.3f} | "
+                  f"Selected: v={best_v:5.3f}, ω={best_w:6.3f} | "
+                  f"ω range=[{min(omega_samples):6.3f}, {max(omega_samples):6.3f}]")
         
         self.orientation = getattr(self, "orientation", 0.0) + self.w * dt
         self.orientation = self._normalize_angle(self.orientation)

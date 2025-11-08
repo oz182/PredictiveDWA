@@ -84,3 +84,6 @@ logs/
 # Simulation outputs
 simulation_data/
 .DS_Store
+
+# Wandb
+wandb/
