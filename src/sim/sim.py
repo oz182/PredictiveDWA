@@ -106,7 +106,7 @@ class Simulation:
         if self.spawn_timer >= self.spawn_interval and len(self.people) < self.num_people:
             self.spawn_person()
             self.spawn_timer = 0
-            self.spawn_interval = random.uniform(0.5, 3.0)
+            self.spawn_interval = random.uniform(0.5, 2.0)
             
         # Update agents
         state, reward, done = self.robot.update(dt, self.people)

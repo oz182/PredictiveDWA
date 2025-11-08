@@ -30,7 +30,7 @@ class Person:
         self.direction = None
         self.target = None
         self.turn_angle = 0
-        self.turn_duration = 0.5  # seconds to complete turn
+        self.turn_duration = 0.9  # seconds to complete turn
         self.turn_progress = 0
         self.corridor_width = corridor_width
         self.corridor_length = corridor_length
@@ -39,9 +39,9 @@ class Person:
         self.state = "entering"  # "entering", "turning", "moving"
         self.direction = None
         self.travel_distance = 0
-        self.max_distance = random.uniform(3.0, 4.0)  # Distance before disappearing
+        self.max_distance = random.uniform(3.0, 7.0)  # Distance before disappearing
         self.turn_angle = 0
-        self.turn_dist = random.uniform(self.corridor_width / 3, self.corridor_width * (2/3))
+        self.turn_dist = random.uniform(self.corridor_width * 0.4, self.corridor_width * 0.85)
 
         # Proxemic footprint (semi-major/minor axes in meters)
         self.proxemic_axes = np.array([radius * 1.5, radius * 0.5], dtype=float)

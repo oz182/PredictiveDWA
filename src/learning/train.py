@@ -237,7 +237,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     # Small progress component to ensure goal-reaching behavior
     # Path handles this mostly, but agent needs SOME signal episodes should end
     progress = (progress_prev_dist - dist)
-    reward = 0.5 * progress  # Reduced from 1.0 - not primary objective
+    reward = 0.85 * progress  # Reduced from 1.0 - not primary objective
     
     # Check overlap with inflation zones
     overlap_info = check_robot_overlap(sim)
@@ -255,7 +255,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
         reward += -1.0  # Increased penalty
     elif overlap_type == 'both':
         # Higher penalty for being in both zones
-        reward += -3.0  # Increased penalty
+        reward += -1.5  # Increased penalty
     else:
         reward += 0.0
 
