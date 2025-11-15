@@ -359,7 +359,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
     # Training loop (episodes of the headless simulation)
     episodes = int(config.get('episodes', 50))
-    max_steps = int(config.get('max_steps', 800))
+    max_steps = int(config.get('max_steps', 3000))
 
     global_step = 0
     returns = []
@@ -523,7 +523,7 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Train navigation policy with PPO (agent-agnostic structure)')
     parser.add_argument('--episodes', type=int, default=50)
-    parser.add_argument('--max-steps', type=int, default=800)
+    parser.add_argument('--max-steps', type=int, default=3000)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--lr-actor', type=float, default=None)
     parser.add_argument('--lr-critic', type=float, default=None)
