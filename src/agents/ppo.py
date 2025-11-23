@@ -104,6 +104,10 @@ class ActorCritic(nn.Module):
         if self.has_continuous_action_space:
             action_mean = self.actor(state)
             
+            # Check for NaN in network output
+            if torch.isnan(action_mean).any():
+                raise ValueError(f"NaN detected in action_mean during evaluation. State: {state}")
+            
             action_var = self.action_var.expand_as(action_mean)
             cov_mat = torch.diag_embed(action_var).to(device)
             dist = MultivariateNormal(action_mean, cov_mat)
@@ -198,6 +202,12 @@ class PPO:
             return action.item()
 
     def update(self):
+        # Safety check: don't update with empty or single-element buffer
+        if len(self.buffer.rewards) < 2:
+            print(f"Warning: Skipping update with insufficient data (buffer size: {len(self.buffer.rewards)})")
+            self.buffer.clear()
+            return
+            
         # Monte Carlo estimate of returns
         rewards = []
         discounted_reward = 0
@@ -209,7 +219,12 @@ class PPO:
             
         # Normalizing the rewards
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+        reward_std = rewards.std()
+        # Only normalize if std is meaningful (> 1e-6)
+        if reward_std > 1e-6:
+            rewards = (rewards - rewards.mean()) / reward_std
+        else:
+            rewards = rewards - rewards.mean()
 
         # convert list to tensor
         old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).detach().to(device)
@@ -242,6 +257,8 @@ class PPO:
             # take gradient step
             self.optimizer.zero_grad()
             loss.mean().backward()
+            # Clip gradients to prevent explosion
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
             self.optimizer.step()
             
         # Copy new weights into old policy

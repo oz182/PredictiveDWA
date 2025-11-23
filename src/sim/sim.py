@@ -37,8 +37,8 @@ class Simulation:
             self.robot.nav.set_door_info(self.get_door_position(), self.door_side)
         
         self.people: List[Person] = []
-        self.spawn_timer = 1.0
-        self.spawn_interval = 1.0  # Spawn a person every second
+        self.spawn_timer = 0.8 # Start at 0.8 seconds to avoid immediate collision
+        self.spawn_interval = 0.5  # Spawn a person every 0.5 seconds
         
         # For visualization
         self.scale = 40  # pixels per meter

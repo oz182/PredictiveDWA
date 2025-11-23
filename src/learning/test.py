@@ -79,7 +79,7 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
         clock = None
 
     for ep in range(episodes):
-        sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
+        sim = Simulation(corridor_width=4.0, door_side='right', num_people=5,
                          people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)])
         # Warm-up step to init internal state
         _, _, _ = sim.step(1/60.0)

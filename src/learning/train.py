@@ -28,7 +28,7 @@ def extract_nav_features(sim) -> np.ndarray:
     Feature vector from current simulation state.
     Includes:
       - goal_angle(1), goal_distance(1) - CRITICAL for navigation
-      - waypoint(2), door_position(2), door_angle(1)
+      - waypoint(2), door_position(2), door_angle(1), door_distance(1)
       - linear_velocity(1), angular_velocity(1)
       - three closest people relative positions wrt robot: [(dx, dy) x 3] (pad with large value if <3)
       - distances to corridor left and right boundaries (y - y_min, y_max - y)
@@ -89,6 +89,12 @@ def extract_nav_features(sim) -> np.ndarray:
         dist_left = max(0.0, y - y_min)
         dist_right = max(0.0, y_max - y)
 
+    # Compute Euclidean distance from robot to door
+    door_distance = float(large_val)
+    if hasattr(sim.robot, 'door_position'):
+        door_pos = np.asarray(sim.robot.door_position, dtype=float)
+        door_distance = float(np.linalg.norm(robot_pos - door_pos))
+
     feat = []
     # Add goal information first (most important!)
     feat.append(float(goal_angle_robot))
@@ -97,6 +103,7 @@ def extract_nav_features(sim) -> np.ndarray:
     feat.extend(list(map(float, nav['waypoint'])))
     feat.extend(list(map(float, nav['door_position'])))
     feat.append(float(nav['door_angle']))
+    feat.append(float(door_distance))  # Added door distance
     feat.append(float(nav['linear_velocity']))
     feat.append(float(nav['angular_velocity']))
     feat.extend(rel_feats)              # (dx, dy) x 3 in robot frame
@@ -107,13 +114,13 @@ def extract_nav_features(sim) -> np.ndarray:
 
 def check_robot_overlap(sim) -> dict:
     """
-    Check if the robot overlaps with person inflation zones or door inflation zone.
+    Check if the robot overlaps with person inflation zones.
+    Door overlap is NOT checked - agent should learn to avoid door implicitly.
     
     Returns:
         dict with keys:
             - 'person_overlap': bool, True if robot is in any person's inflation zone
-            - 'door_overlap': bool, True if robot is in door's inflation zone
-            - 'overlap_type': str, one of 'none', 'person', 'door', 'both'
+            - 'overlap_type': str, either 'none' or 'person'
     """
     robot_pos = sim.robot.position
     robot_radius = sim.robot.radius
@@ -174,47 +181,11 @@ def check_robot_overlap(sim) -> dict:
             person_overlap = True
             break
     
-    # Check door overlap
-    door_overlap = False
-    if hasattr(sim.robot, 'door_position') and hasattr(sim.robot, 'corridor_bounds'):
-        door_pos = np.array(sim.robot.door_position, dtype=float)
-        bounds = sim.robot.corridor_bounds
-        
-        # Door halo radius
-        door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
-        
-        # Distance from robot to door
-        dist_to_door = np.linalg.norm(robot_pos - door_pos)
-        
-        # Determine door side and inward normal
-        corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
-        door_side = "left" if door_pos[1] < corridor_mid_y else "right"
-        n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
-        
-        # Vector from door to robot
-        v_x = robot_pos[0] - door_pos[0]
-        v_y = robot_pos[1] - door_pos[1]
-        
-        # Check if robot is on the inward-facing side (semicircle)
-        dot_product = n_world[0] * v_x + n_world[1] * v_y
-        
-        # Robot overlaps if within door halo radius AND on inward-facing side
-        if dist_to_door <= (door_inflation_radius + robot_radius) and dot_product > 0.0:
-            door_overlap = True
-    
-    # Determine overlap type
-    if person_overlap and door_overlap:
-        overlap_type = 'both'
-    elif person_overlap:
-        overlap_type = 'person'
-    elif door_overlap:
-        overlap_type = 'door'
-    else:
-        overlap_type = 'none'
+    # Determine overlap type (simplified - no door)
+    overlap_type = 'person' if person_overlap else 'none'
     
     return {
         'person_overlap': person_overlap,
-        'door_overlap': door_overlap,
         'overlap_type': overlap_type
     }
 
@@ -225,8 +196,11 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     
     Key improvements:
     1. Progress component (small) to ensure episodes complete
-    2. Obstacle-based rewards (primary signal)
+    2. Person obstacle-based rewards (primary signal)
     3. Offset regularization to encourage meaningful corrections
+    
+    NOTE: Door is NOT penalized - agent should learn to avoid it implicitly
+    by avoiding people who emerge from the door.
     
     Returns (reward, new_progress_distance, info)
     """
@@ -235,46 +209,44 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
     # Small progress component to ensure goal-reaching behavior
-    # Path handles this mostly, but agent needs SOME signal episodes should end
     progress = (progress_prev_dist - dist)
-    reward = 0.85 * progress  # Reduced from 1.0 - not primary objective
+    reward = 0.85 * progress
     
-    # Check overlap with inflation zones
+    # Check overlap with person inflation zones only
     overlap_info = check_robot_overlap(sim)
     
-    # PRIMARY SIGNAL: Obstacle-based rewards
+    # PRIMARY SIGNAL: Person obstacle-based rewards
     overlap_type = overlap_info['overlap_type']
     if overlap_type == 'none':
         # Positive reward for staying in free space
-        reward += 0.5
+        reward -= 0.1
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        reward += -2.0  # Increased penalty to make signal stronger
-    elif overlap_type == 'door':
-        # Penalty for being in door's inflation zone
-        reward += -1.0  # Increased penalty
-    elif overlap_type == 'both':
-        # Higher penalty for being in both zones
-        reward += -1.5  # Increased penalty
-    else:
-        reward += 0.0
+        reward += -4.0
+
 
     # Offset regularization: Encourage agent to use offsets purposefully
-    # Small offset when safe, larger offset when avoiding obstacles
     offset_penalty = 0.1 * abs(offset)
     reward -= offset_penalty
 
     # Small time penalty to encourage efficiency
-    reward -= 0.01
+    reward -= 0.3
 
-    # Hard collision penalty (critical - must avoid)
+    # Hard collision penalty
     collisions = sim.collision_count
+    
+    # Compute door distance for logging (not penalized)
+    door_distance = float(10.0)
+    if hasattr(sim.robot, 'door_position'):
+        door_pos = np.array(sim.robot.door_position, dtype=float)
+        door_distance = float(np.linalg.norm(robot_pos - door_pos))
+    
     info = {
         'distance': dist,
         'collisions': collisions,
         'overlap_type': overlap_type,
         'person_overlap': overlap_info['person_overlap'],
-        'door_overlap': overlap_info['door_overlap'],
+        'door_distance': door_distance,  # Log for analysis (not penalized)
         'offset': offset,
         'offset_abs': abs(offset),
     }
@@ -282,10 +254,10 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     # If a collision occurred in this step
     if sim.collision_history:
         if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -10.0  # Large penalty for actual collision
+            reward += -10.0
     
     # Goal bonus to ensure episodes terminate successfully
-    if dist < 1.0:
+    if dist < 2.0:
         reward += 20.0
 
     return reward, dist, info
@@ -316,7 +288,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     dt = float(config.get('dt', 1/60.0))
     corridor_width = float(config.get('corridor_width', 4.0))
     door_side = str(config.get('door_side', 'right'))
-    num_people = int(config.get('num_people', 3))
+    num_people = int(config.get('num_people', 5))
     people_speed_min = float(config.get('people_speed_min', 0.6))
     people_speed_max = float(config.get('people_speed_max', 1.2))
 
@@ -380,7 +352,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         prev_dist = float(np.linalg.norm(goal_pos - robot_pos))
 
         episode_return = 0.0
-        overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
+        overlap_counts = {'none': 0, 'person': 0}
         offset_history = []  # Track offsets for analysis
 
         # Storage for action repetition
@@ -439,8 +411,9 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
             global_step += 1
             if done_flag:
-                # Update at episode boundary as well
-                agent.update()
+                # Update at episode boundary only if buffer has data
+                if len(agent.buffer.rewards) > 0:
+                    agent.update()
                 break
 
         # Episode metrics
@@ -455,7 +428,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         max_abs_offset_deg = max_abs_offset * 180 / math.pi
 
         print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
-        print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
+        print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}%")
         print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±30°)")
 
         if use_wandb and wandb is not None:
@@ -465,8 +438,6 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'steps': total_steps,
                 'overlap_free_pct': overlap_pct['none'],
                 'overlap_person_pct': overlap_pct['person'],
-                'overlap_door_pct': overlap_pct['door'],
-                'overlap_both_pct': overlap_pct['both'],
                 'avg_abs_offset_deg': avg_abs_offset_deg,
                 'max_abs_offset_deg': max_abs_offset_deg,
                 'elapsed_min': (time.time() - start_time) / 60.0,
