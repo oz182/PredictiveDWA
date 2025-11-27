@@ -3,6 +3,7 @@ import numpy as np
 import random
 import csv
 import os
+import math
 from datetime import datetime
 from typing import List, Tuple
 
@@ -147,7 +148,79 @@ class Simulation:
             person.draw(screen, self.scale, self.offset)
         self.robot.draw(screen, self.scale, self.offset)
 
-    def draw_v0(self, screen):
+    def draw_v0(self, screen, state_input=None):
+        # Different from 'draw' function: Print the number of people, robot's speed, and robot's position
+        # on the screen
+
+        # Draw corridor
+        corridor_rect = pygame.Rect(
+            self.offset[0],
+            self.offset[1],
+            int(self.corridor_length * self.scale),
+            int(self.corridor_width * self.scale)
+        )
+        pygame.draw.rect(screen, (200, 200, 200), corridor_rect, 1)
+        
+        # Draw door
+        door_pos = int(self.door_position * self.scale) + self.offset[0]
+        if self.door_side == "right":
+            door_y = int(self.corridor_width * self.scale) + self.offset[1] - 10
+            pygame.draw.line(screen, (0, 255, 0), (door_pos, door_y), (door_pos, door_y + 10), 3)
+        else:
+            door_y = self.offset[1]
+            pygame.draw.line(screen, (0, 255, 0), (door_pos, door_y), (door_pos, door_y + 10), 3)
+        
+        # Draw goal if set
+        if self.robot.goal is not None:
+            goal_pos = (self.robot.goal * self.scale + self.offset).astype(int)
+            pygame.draw.circle(screen, (255, 215, 0), goal_pos, 8)  # Gold color
+        
+        # Draw people
+        for person in self.people:
+            person.draw(screen, self.scale, self.offset)
+        
+        # Draw robot (with trajectories)
+        self.robot.draw(screen, self.scale, self.offset)
+        
+        # Display info
+        font = pygame.font.SysFont(None, 24)
+        info_text = [
+            f"Position: ({self.robot.position[0]:.1f}, {self.robot.position[1]:.1f})",
+        ]
+
+        # Optional: display state_input feature vector for debugging.
+        # Assumes layout from learning.extract_nav_features:
+        # [goal_dx, goal_dy, door_dx, door_dy,
+        #  p1_dx, p1_dy, p2_dx, p2_dy, p3_dx, p3_dy,
+        #  dist_left, dist_right]
+        if state_input is not None:
+            feat = np.asarray(state_input, dtype=float).tolist()
+            if len(feat) >= 12:
+                gdx, gdy = feat[0], feat[1]
+                door_dx, door_dy = feat[2], feat[3]
+                p1_dx, p1_dy = feat[4], feat[5]
+                p2_dx, p2_dy = feat[6], feat[7]
+                p3_dx, p3_dy = feat[8], feat[9]
+                dist_left = feat[10]
+                dist_right = feat[11]
+
+                info_text.extend([
+                    f"goal_rel:   ({gdx:5.2f}, {gdy:5.2f})",
+                    f"door_rel:   ({door_dx:5.2f}, {door_dy:5.2f})",
+                    f"p1_rel:     ({p1_dx:5.2f}, {p1_dy:5.2f})",
+                    f"p2_rel:     ({p2_dx:5.2f}, {p2_dy:5.2f})",
+                    f"p3_rel:     ({p3_dx:5.2f}, {p3_dy:5.2f})",
+                    f"dist_left:  {dist_left:5.2f} m",
+                    f"dist_right: {dist_right:5.2f} m",
+                ])
+            else:
+                info_text.append(f"state_input (len={len(feat)}): {feat}")
+        
+        for i, text in enumerate(info_text):
+            text_surface = font.render(text, True, (0, 0, 0))
+            screen.blit(text_surface, (10, 10 + i * 25))
+
+    def draw_v1(self, screen):
         # Different from 'draw' function: Print the number of people, robot's speed, and robot's position
         # on the screen
 

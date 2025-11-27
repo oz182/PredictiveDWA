@@ -61,9 +61,9 @@ def plot_and_print_offsets(offset_vals):
 
 
 def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action_select_interval=1):
-    random.seed(123)
-    np.random.seed(123)
-    torch.manual_seed(123)
+    random.seed(321)
+    np.random.seed(321)
+    torch.manual_seed(321)
 
     agent = load_model(model_path)
 
@@ -122,7 +122,8 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
             # Render
             if render:
                 screen.fill((255, 255, 255))
-                sim.draw_v0(screen)
+                # Pass state features into draw_v0 for debugging/visualization
+                sim.draw_v0(screen, state_input=feat)
                 import pygame
                 pygame.display.flip()
 

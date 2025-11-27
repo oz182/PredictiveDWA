@@ -198,6 +198,9 @@ class PPO:
             return action.item()
 
     def update(self):
+        if len(self.buffer.rewards) == 0:
+            return None
+
         # Monte Carlo estimate of returns
         rewards = []
         discounted_reward = 0
@@ -207,7 +210,7 @@ class PPO:
             discounted_reward = reward + (self.gamma * discounted_reward)
             rewards.insert(0, discounted_reward)
             
-        # Normalizing the rewards
+        # Normalizing the rewards (guard against tiny buffers / zero-variance)
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
         rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
 
@@ -220,7 +223,12 @@ class PPO:
         # calculate advantages
         advantages = rewards.detach() - old_state_values.detach()
 
-        # Optimize policy for K epochs
+        # Optimize policy for K epochs and track losses
+        policy_losses = []
+        value_losses = []
+        entropies = []
+        total_losses = []
+
         for _ in range(self.K_epochs):
 
             # Evaluating old actions and values
@@ -236,19 +244,39 @@ class PPO:
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
 
+            # Decompose losses
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss = self.MseLoss(state_values, rewards)
+            entropy_mean = dist_entropy.mean()
+
             # final loss of clipped objective PPO
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
+            loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_mean
             
-            # take gradient step
+            # take gradient step with gradient clipping for stability
             self.optimizer.zero_grad()
             loss.mean().backward()
+            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5) ### GRADIENT CLIPPING
             self.optimizer.step()
+
+            policy_losses.append(float(policy_loss.item()))
+            value_losses.append(float(value_loss.item()))
+            entropies.append(float(entropy_mean.item()))
+            total_losses.append(float(loss.item()))
             
         # Copy new weights into old policy
         self.policy_old.load_state_dict(self.policy.state_dict())
 
         # clear buffer
         self.buffer.clear()
+
+        # Return averaged loss statistics for logging
+        n = max(1, len(total_losses))
+        return {
+            "loss": sum(total_losses) / n,
+            "policy_loss": sum(policy_losses) / n,
+            "value_loss": sum(value_losses) / n,
+            "entropy": sum(entropies) / n,
+        }
     
     def save(self, checkpoint_path):
         torch.save(self.policy_old.state_dict(), checkpoint_path)

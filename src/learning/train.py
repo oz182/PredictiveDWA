@@ -21,9 +21,75 @@ from agents.ppo import PPO
 import wandb  
 import optuna  
 
-
-
 def extract_nav_features(sim) -> np.ndarray:
+    """
+    Feature vector from current simulation state (robot-centric in world frame).
+    Includes:
+      - relative goal position in world frame: (goal_dx, goal_dy)
+      - relative door position in world frame: (door_dx, door_dy)
+      - three closest people relative positions wrt robot: [(dx, dy) x 3] (pad with large value if <3)
+      - distances to corridor left and right boundaries (y - y_min, y_max - y)
+    """
+    robot_pos = np.asarray(sim.robot.position, dtype=float)
+    goal_pos = np.asarray(sim.robot.goal, dtype=float)
+    door_pos = np.asarray(sim.robot.door_position, dtype=float)
+    large_val = 10.0
+
+    # Relative goal and door positions (world frame)
+    goal_dx = float(goal_pos[0] - robot_pos[0])
+    goal_dy = float(goal_pos[1] - robot_pos[1])
+    door_dx = float(door_pos[0] - robot_pos[0])
+    door_dy = float(door_pos[1] - robot_pos[1])
+
+    # Compute three closest people relative positions (dx, dy) in world frame
+    rel_people: list[tuple[float, float, float]] = []  # (dist, dx, dy)
+    if hasattr(sim.robot, 'people'):
+        for person in sim.robot.people:
+            if getattr(person, 'active', True):
+                p = np.asarray(person.position, dtype=float)
+                dx = float(p[0] - robot_pos[0])
+                dy = float(p[1] - robot_pos[1])
+                d = math.hypot(dx, dy)
+                rel_people.append((d, dx, dy))
+    
+    rel_people.sort(key=lambda t: t[0])
+    # Take up to 3, pad if fewer
+    rel_feats: list[float] = []
+    for i in range(3):
+        if i < len(rel_people):
+            _, dx, dy = rel_people[i]
+            rel_feats.extend([dx, dy])
+        else:
+            rel_feats.extend([large_val, large_val])
+
+    # Distances to corridor left/right sides using world y-bounds
+    dist_left = float(large_val)
+    dist_right = float(large_val)
+    if hasattr(sim.robot, 'corridor_bounds'):
+        bounds = sim.robot.corridor_bounds
+        y_min = float(bounds['y_min'])
+        y_max = float(bounds['y_max'])
+        y = float(robot_pos[1])
+        dist_left = max(0.0, y - y_min)
+        dist_right = max(0.0, y_max - y)
+
+    feat: list[float] = []
+    # Goal relative position (most important)
+    feat.append(goal_dx)
+    feat.append(goal_dy)
+    # Door relative position
+    feat.append(door_dx)
+    feat.append(door_dy)
+    # People relative positions
+    feat.extend(rel_feats)
+    # Wall distances
+    feat.append(dist_left)
+    feat.append(dist_right)
+
+    return np.asarray(feat, dtype=np.float32)
+
+
+def extract_nav_features_v0(sim) -> np.ndarray:
     """
     Feature vector from current simulation state.
     Includes:
@@ -234,11 +300,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     goal_pos = sim.robot.goal
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
-    # Small progress component to ensure goal-reaching behavior
-    # Path handles this mostly, but agent needs SOME signal episodes should end
-    progress = (progress_prev_dist - dist)
-    reward = 0.85 * progress  # Reduced from 1.0 - not primary objective
-    
+    reward = 0
     # Check overlap with inflation zones
     overlap_info = check_robot_overlap(sim)
     
@@ -246,26 +308,15 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     overlap_type = overlap_info['overlap_type']
     if overlap_type == 'none':
         # Positive reward for staying in free space
-        reward += 0.5
+        reward = -0.1
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        reward += -2.0  # Increased penalty to make signal stronger
-    elif overlap_type == 'door':
-        # Penalty for being in door's inflation zone
-        reward += -1.0  # Increased penalty
+        reward = -1.0  # Increased penalty to make signal stronger
     elif overlap_type == 'both':
         # Higher penalty for being in both zones
-        reward += -1.5  # Increased penalty
+        reward = -1.0  # Increased penalty
     else:
-        reward += 0.0
-
-    # Offset regularization: Encourage agent to use offsets purposefully
-    # Small offset when safe, larger offset when avoiding obstacles
-    offset_penalty = 0.1 * abs(offset)
-    reward -= offset_penalty
-
-    # Small time penalty to encourage efficiency
-    reward -= 0.01
+        reward = -0.1
 
     # Hard collision penalty (critical - must avoid)
     collisions = sim.collision_count
@@ -282,11 +333,8 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     # If a collision occurred in this step
     if sim.collision_history:
         if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -10.0  # Large penalty for actual collision
+            reward += -1.0  # Large penalty for actual collision
     
-    # Goal bonus to ensure episodes terminate successfully
-    if dist < 1.0:
-        reward += 20.0
 
     return reward, dist, info
 
@@ -395,15 +443,17 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 # Sample new action via policy (also records state/action/logprob/value in buffer)
                 offset_normalized = agent.select_action(state_feat)  # Returns array
                 prev_offset = float(offset_normalized[0])
+                prev_offset = max(-1.0, min(1.0, prev_offset))
             else:
                 # Reuse previous action but still log this step into PPO buffer
                 offset_normalized_value = prev_offset
-                policy_device = next(agent.policy.parameters()).device
+                # IMPORTANT: use policy_old for consistency with PPO's importance sampling
+                policy_device = next(agent.policy_old.parameters()).device
                 state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
                 state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
                 action_tensor_batch = torch.tensor([[offset_normalized_value]], dtype=torch.float32, device=policy_device)
                 with torch.no_grad():
-                    old_logprob, state_value, _ = agent.policy.evaluate(state_tensor_batch, action_tensor_batch)
+                    old_logprob, state_value, _ = agent.policy_old.evaluate(state_tensor_batch, action_tensor_batch)
                 # Match shapes used by select_action: state (no batch), action ([1, action_dim])
                 agent.buffer.states.append(state_tensor_no_batch)
                 agent.buffer.actions.append(action_tensor_batch)
@@ -435,12 +485,31 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             # Trigger update at fixed timesteps
             time_step += 1
             if time_step % update_timestep == 0:
-                agent.update()
+                update_stats = agent.update()
+                if use_wandb and wandb is not None and update_stats is not None:
+                    wandb.log({
+                        'ppo_loss': update_stats['loss'],
+                        'ppo_policy_loss': update_stats['policy_loss'],
+                        'ppo_value_loss': update_stats['value_loss'],
+                        'ppo_entropy': update_stats['entropy'],
+                        'train_time_step': time_step,
+                    })
+
+            if time_step % (10 * update_timestep) == 0:  # e.g. every 10 updates ####### ADD ACTION STD DECAY HERE #######
+                agent.decay_action_std(action_std_decay_rate=0.01, min_action_std=0.05)
 
             global_step += 1
             if done_flag:
                 # Update at episode boundary as well
-                agent.update()
+                update_stats = agent.update()
+                if use_wandb and wandb is not None and update_stats is not None:
+                    wandb.log({
+                        'ppo_loss': update_stats['loss'],
+                        'ppo_policy_loss': update_stats['policy_loss'],
+                        'ppo_value_loss': update_stats['value_loss'],
+                        'ppo_entropy': update_stats['entropy'],
+                        'train_time_step': time_step,
+                    })
                 break
 
         # Episode metrics
@@ -522,9 +591,9 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Train navigation policy with PPO (agent-agnostic structure)')
-    parser.add_argument('--episodes', type=int, default=50)
+    parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--max-steps', type=int, default=3000)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--lr-actor', type=float, default=None)
     parser.add_argument('--lr-critic', type=float, default=None)
     parser.add_argument('--hidden', type=int, default=128)

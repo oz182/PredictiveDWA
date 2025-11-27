@@ -767,8 +767,13 @@ class TSDWA:
         self.wall_check_points = max(1, int(len(traj) / (0.5 * corridor_width)))
 
         min_dist = float("inf")
+        # Only consider people within a limited radius of the robot
+        max_person_distance = 4.0  # meters; tune as needed
         for person in people:
             if not person.active:
+                continue
+            # Skip people that are far away from the robot
+            if np.linalg.norm(person.position - self.position) > max_person_distance:
                 continue
             for p in traj:
                 d = np.linalg.norm(p - person.position) - self.radius - person.radius
