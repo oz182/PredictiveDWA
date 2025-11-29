@@ -21,6 +21,64 @@ from agents.ppo import PPO
 import wandb  
 import optuna  
 
+def get_curriculum_params(episode: int, total_episodes: int) -> dict:
+    """
+    Get curriculum learning parameters based on episode number.
+    
+    Gradually increases difficulty:
+    - Early training: narrow ranges around known working values
+    - Mid training: expand ranges
+    - Late training: full diversity
+    
+    Args:
+        episode: Current episode number (0-indexed)
+        total_episodes: Total number of training episodes
+        
+    Returns:
+        dict with keys:
+            - door_halo_radius_range: (min, max) for radius sampling
+            - door_position_x_range: (min, max) for door x position
+            - randomize_door_side: whether to randomize door side
+    """
+    # Calculate progress (0.0 to 1.0)
+    progress = episode / max(total_episodes, 1)
+    
+    # Stage 1: Easy (first 20% of training)
+    if progress < 0.2:
+        return {
+            'door_halo_radius_range': (1.6, 2.0),  # Narrow range around known value
+            'door_position_x_range': (7.0, 9.0),   # Fixed around 40% of 20m corridor
+            'randomize_door_side': False,          # Keep door on right side
+            'stage': 'easy'
+        }
+    
+    # Stage 2: Medium (20% - 50% of training)
+    elif progress < 0.5:
+        return {
+            'door_halo_radius_range': (1.2, 2.3),  # Expanded range
+            'door_position_x_range': (6.0, 11.0),  # More variation in position
+            'randomize_door_side': False,          # Still on right side
+            'stage': 'medium'
+        }
+    
+    # Stage 3: Hard (50% - 80% of training)
+    elif progress < 0.8:
+        return {
+            'door_halo_radius_range': (0.8, 2.5),  # Full range
+            'door_position_x_range': (5.0, 13.0),  # Wide variation
+            'randomize_door_side': True,           # Randomize left/right
+            'stage': 'hard'
+        }
+    
+    # Stage 4: Expert (final 20% of training)
+    else:
+        return {
+            'door_halo_radius_range': (0.8, 2.5),  # Full range
+            'door_position_x_range': (5.0, 13.0),  # Full range (25%-65% of corridor)
+            'randomize_door_side': True,           # Fully randomized
+            'stage': 'expert'
+        }
+
 def extract_nav_features(sim) -> np.ndarray:
     """
     Feature vector from current simulation state (robot-centric in world frame).
@@ -378,9 +436,11 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     # Infer input feature dimension using a temporary simulation
     tmp_sim = Simulation(
         corridor_width=corridor_width,
-        door_side=door_side,
+        door_side='right',  # Fixed for initialization
         num_people=num_people,
         people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
+        door_halo_radius=1.8,  # Fixed for initialization
+        door_position_x=8.0,  # Fixed for initialization
     )
     _ = tmp_sim.step(dt)
     input_dim = int(len(extract_nav_features(tmp_sim)))
@@ -421,11 +481,21 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     start_time = time.time()
 
     for ep in range(episodes):
+        # Get curriculum parameters for this episode
+        curriculum = get_curriculum_params(ep, episodes)
+        
+        # Sample door parameters from curriculum ranges
+        door_halo_radius = random.uniform(*curriculum['door_halo_radius_range'])
+        door_position_x = random.uniform(*curriculum['door_position_x_range'])
+        door_side_param = None if curriculum['randomize_door_side'] else 'right'
+        
         sim = Simulation(
             corridor_width=corridor_width,
-            door_side=door_side,
+            door_side=door_side_param,
             num_people=num_people,
             people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
+            door_halo_radius=door_halo_radius,
+            door_position_x=door_position_x,
         )
 
         # Reset progress tracker
@@ -531,6 +601,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         max_abs_offset_deg = max_abs_offset * 180 / math.pi
 
         print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
+        print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
         print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±30°)")
 
@@ -546,6 +617,11 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'avg_abs_offset_deg': avg_abs_offset_deg,
                 'max_abs_offset_deg': max_abs_offset_deg,
                 'elapsed_min': (time.time() - start_time) / 60.0,
+                # Curriculum parameters
+                'curriculum_stage': curriculum['stage'],
+                'door_halo_radius': door_halo_radius,
+                'door_position_x': door_position_x,
+                'door_side': sim.door_side,
             })
 
     avg_return = float(np.mean(returns)) if returns else 0.0

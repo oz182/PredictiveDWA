@@ -15,7 +15,7 @@ from algo.global_planner import AStarGlobalPlanner
 
 
 class Robot:
-    def __init__(self, position: Tuple[float, float], radius: float, corridor_bounds: dict, door_position: Tuple[float, float]):
+    def __init__(self, position: Tuple[float, float], radius: float, corridor_bounds: dict, door_position: Tuple[float, float], door_halo_radius: float = 1.8):
         self.position = np.array(position, dtype=float)
         self.radius = radius
         self.velocity = np.array([0.0, 0.0])
@@ -48,7 +48,7 @@ class Robot:
             door_pos, 
             door_side,
             resolution=0.25,
-            door_halo_radius=1.8,  # 1 meter radius around door
+            door_halo_radius=door_halo_radius,  # Pass as parameter for curriculum learning
             consider_doors=False   # Force straight-line until door handling is desired
         )
         self.global_path = None  # will be initialised after goal is set

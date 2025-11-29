@@ -12,16 +12,45 @@ from sim.robot import Robot
 
 
 class Simulation:
-    def __init__(self, corridor_width: float = 5.0, door_side: str = "right", 
-                 num_people: int = 5, people_speeds: List[float] = None):
+    def __init__(self, corridor_width: float = 5.0, door_side: str = None, 
+                 num_people: int = 5, people_speeds: List[float] = None,
+                 door_halo_radius: float = None, door_position_x: float = None):
+        """
+        Initialize simulation with optional curriculum learning parameters.
+        
+        Args:
+            corridor_width: Width of the corridor (m)
+            door_side: "left" or "right", or None to randomize
+            num_people: Number of people to spawn
+            people_speeds: List of speeds for people, or None to randomize
+            door_halo_radius: Inflation radius around door (m), or None to randomize
+            door_position_x: X position of door along corridor (m), or None to randomize
+        """
         self.corridor_width = corridor_width
-        self.door_side = door_side
         self.num_people = num_people
         self.people_speeds = people_speeds if people_speeds else [random.uniform(0.6, 1.2) for _ in range(num_people)]
         
         # Corridor dimensions
         self.corridor_length = 20.0
-        self.door_position = 0.4 * self.corridor_length  # Door is 40% along corridor
+        
+        # Randomize door position if not specified (between 20% and 70% of corridor length)
+        if door_position_x is None:
+            self.door_position = random.uniform(0.25 * self.corridor_length, 0.65 * self.corridor_length)
+        else:
+            self.door_position = door_position_x
+            
+        # Randomize door side if not specified
+        if door_side is None:
+            self.door_side = random.choice(["left", "right"])
+        else:
+            self.door_side = door_side
+            
+        # Randomize door halo radius if not specified (default range: 0.8m to 2.5m)
+        if door_halo_radius is None:
+            self.door_halo_radius = random.uniform(0.8, 2.5)
+        else:
+            self.door_halo_radius = door_halo_radius
+        
         self.corridor_bounds = {
             'x_min': 0,
             'x_max': self.corridor_length,
@@ -30,7 +59,8 @@ class Simulation:
         }
         
         # Initialize agents
-        self.robot = Robot((0.5, corridor_width/1.25), 0.2, self.corridor_bounds, self.get_door_position())
+        self.robot = Robot((0.5, corridor_width/1.25), 0.2, self.corridor_bounds, 
+                          self.get_door_position(), door_halo_radius=self.door_halo_radius)
         self.robot.set_goal((self.corridor_length - 1.0, corridor_width/1.2))
         
         # Set door information for DWA
