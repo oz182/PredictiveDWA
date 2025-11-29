@@ -377,9 +377,12 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
         reward = -1.0  # Increased penalty to make signal stronger
+    elif overlap_type == 'door':
+        # Penalty for being in door's inflation zone
+        reward = -1.0  # Same as person overlap
     elif overlap_type == 'both':
-        # Higher penalty for being in both zones
-        reward = -1.0  # Increased penalty
+        # Higher penalty for being in both zones simultaneously
+        reward = -2.0  # Worse than individual overlaps
     else:
         reward = -0.1
 
