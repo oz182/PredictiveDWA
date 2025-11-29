@@ -29,6 +29,7 @@ def extract_nav_features(sim) -> np.ndarray:
       - relative door position in world frame: (door_dx, door_dy)
       - three closest people relative positions wrt robot: [(dx, dy) x 3] (pad with large value if <3)
       - distances to corridor left and right boundaries (y - y_min, y_max - y)
+      - door_inflation_radius(1) - normalized door halo radius
     """
     robot_pos = np.asarray(sim.robot.position, dtype=float)
     goal_pos = np.asarray(sim.robot.goal, dtype=float)
@@ -73,6 +74,10 @@ def extract_nav_features(sim) -> np.ndarray:
         dist_left = max(0.0, y - y_min)
         dist_right = max(0.0, y_max - y)
 
+    # Door inflation radius (normalized by max expected value of 3.0m)
+    door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
+    door_inflation_radius_normalized = door_inflation_radius / 3.0
+
     feat: list[float] = []
     # Goal relative position (most important)
     feat.append(goal_dx)
@@ -85,6 +90,8 @@ def extract_nav_features(sim) -> np.ndarray:
     # Wall distances
     feat.append(dist_left)
     feat.append(dist_right)
+    # Door inflation radius
+    feat.append(door_inflation_radius_normalized)
 
     return np.asarray(feat, dtype=np.float32)
 
