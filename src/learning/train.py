@@ -444,7 +444,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     
     if overlap_type == 'none':
         # POSITIVE reward for staying in free space
-        overlap_reward = 0.1
+        overlap_reward = 1.0
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
         overlap_reward = -1.0
@@ -477,7 +477,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
         # Closer to door = more negative
         shaping_reward += -0.1 * (1.0 - min_door_dist / shaping_threshold)
     
-    reward += shaping_reward
+    #reward += shaping_reward
     
     # ==========================================================================
     # 4. COLLISION PENALTY - Large penalty for actual physical collisions
@@ -619,6 +619,9 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
         offset_history = []  # Track offsets for analysis
         reward_components = {'progress': 0.0, 'overlap': 0.0, 'shaping': 0.0}  # Track reward breakdown
+        
+        # Loss tracking for this episode
+        episode_losses = {'total': [], 'policy': [], 'value': [], 'entropy': []}
 
         # Storage for action repetition
         prev_offset = None
@@ -682,14 +685,21 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             time_step += 1
             if time_step % update_timestep == 0:
                 update_stats = agent.update()
-                if use_wandb and wandb is not None and update_stats is not None:
-                    wandb.log({
-                        'ppo_loss': update_stats['loss'],
-                        'ppo_policy_loss': update_stats['policy_loss'],
-                        'ppo_value_loss': update_stats['value_loss'],
-                        'ppo_entropy': update_stats['entropy'],
-                        'train_time_step': time_step,
-                    })
+                if update_stats is not None:
+                    # Track losses for episode-level averaging
+                    episode_losses['total'].append(update_stats['loss'])
+                    episode_losses['policy'].append(update_stats['policy_loss'])
+                    episode_losses['value'].append(update_stats['value_loss'])
+                    episode_losses['entropy'].append(update_stats['entropy'])
+                    
+                    if use_wandb and wandb is not None:
+                        wandb.log({
+                            'loss/total': update_stats['loss'],
+                            'loss/policy': update_stats['policy_loss'],
+                            'loss/value': update_stats['value_loss'],
+                            'loss/entropy': update_stats['entropy'],
+                            'train_step': time_step,
+                        }, step=global_step)
 
             if time_step % (10 * update_timestep) == 0:  # e.g. every 10 updates ####### ADD ACTION STD DECAY HERE #######
                 agent.decay_action_std(action_std_decay_rate=0.01, min_action_std=0.05)
@@ -698,14 +708,21 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             if done_flag:
                 # Update at episode boundary as well
                 update_stats = agent.update()
-                if use_wandb and wandb is not None and update_stats is not None:
-                    wandb.log({
-                        'ppo_loss': update_stats['loss'],
-                        'ppo_policy_loss': update_stats['policy_loss'],
-                        'ppo_value_loss': update_stats['value_loss'],
-                        'ppo_entropy': update_stats['entropy'],
-                        'train_time_step': time_step,
-                    })
+                if update_stats is not None:
+                    # Track losses for episode-level averaging
+                    episode_losses['total'].append(update_stats['loss'])
+                    episode_losses['policy'].append(update_stats['policy_loss'])
+                    episode_losses['value'].append(update_stats['value_loss'])
+                    episode_losses['entropy'].append(update_stats['entropy'])
+                    
+                    if use_wandb and wandb is not None:
+                        wandb.log({
+                            'loss/total': update_stats['loss'],
+                            'loss/policy': update_stats['policy_loss'],
+                            'loss/value': update_stats['value_loss'],
+                            'loss/entropy': update_stats['entropy'],
+                            'train_step': time_step,
+                        }, step=global_step)
                 break
 
         # Episode metrics
@@ -719,11 +736,21 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         avg_abs_offset_deg = avg_abs_offset * 180 / math.pi
         max_abs_offset_deg = max_abs_offset * 180 / math.pi
 
+        # Calculate episode-level average losses
+        avg_episode_losses = {
+            'total': np.mean(episode_losses['total']) if episode_losses['total'] else 0.0,
+            'policy': np.mean(episode_losses['policy']) if episode_losses['policy'] else 0.0,
+            'value': np.mean(episode_losses['value']) if episode_losses['value'] else 0.0,
+            'entropy': np.mean(episode_losses['entropy']) if episode_losses['entropy'] else 0.0,
+        }
+
         print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
         print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
         print(f"  Rewards - Progress: {reward_components['progress']:.2f} | Overlap: {reward_components['overlap']:.2f} | Shaping: {reward_components['shaping']:.2f}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
         print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±60°)")
+        if episode_losses['total']:
+            print(f"  Losses - Total: {avg_episode_losses['total']:.4f} | Policy: {avg_episode_losses['policy']:.4f} | Value: {avg_episode_losses['value']:.4f} | Entropy: {avg_episode_losses['entropy']:.4f}")
 
         if use_wandb and wandb is not None:
             wandb.log({
@@ -748,6 +775,11 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'door_halo_radius': door_halo_radius,
                 'door_position_x': door_position_x,
                 'door_side': sim.door_side,
+                # Episode-averaged losses (for loss graphs by episode)
+                'loss_episode/total': avg_episode_losses['total'],
+                'loss_episode/policy': avg_episode_losses['policy'],
+                'loss_episode/value': avg_episode_losses['value'],
+                'loss_episode/entropy': avg_episode_losses['entropy'],
             })
 
     avg_return = float(np.mean(returns)) if returns else 0.0
