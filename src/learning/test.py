@@ -3,6 +3,7 @@ import sys
 import math
 import argparse
 import random
+import time
 
 import numpy as np
 import torch
@@ -61,9 +62,9 @@ def plot_and_print_offsets(offset_vals):
 
 
 def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action_select_interval=1):
-    random.seed(321)
-    np.random.seed(321)
-    torch.manual_seed(321)
+    random.seed(int(time.time()))
+    np.random.seed(int(time.time()))
+    torch.manual_seed(int(time.time()))
 
     agent = load_model(model_path)
 
