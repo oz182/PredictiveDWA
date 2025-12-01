@@ -134,7 +134,7 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
         print(f"Episode {ep+1}/{episodes} finished in {t+1} steps")
         # Clear rollout buffer accumulated during select_action calls (no updates during eval)
         agent.buffer.clear()
-        plot_and_print_offsets(offset_history)
+        # plot_and_print_offsets(offset_history)
 
     if render:
         import pygame
