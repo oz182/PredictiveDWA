@@ -104,6 +104,12 @@ class ActorCritic(nn.Module):
         if self.has_continuous_action_space:
             action_mean = self.actor(state)
             
+            # Check for NaN in action_mean and replace with zeros if needed
+            if torch.isnan(action_mean).any():
+                action_mean = torch.where(torch.isnan(action_mean), 
+                                         torch.zeros_like(action_mean), 
+                                         action_mean)
+            
             action_var = self.action_var.expand_as(action_mean)
             cov_mat = torch.diag_embed(action_var).to(device)
             dist = MultivariateNormal(action_mean, cov_mat)
@@ -200,6 +206,11 @@ class PPO:
     def update(self):
         if len(self.buffer.rewards) == 0:
             return None
+        
+        # Need at least 2 samples for meaningful update (std calculation requires n > 1)
+        if len(self.buffer.rewards) < 2:
+            self.buffer.clear()
+            return None
 
         # Monte Carlo estimate of returns
         rewards = []
@@ -212,16 +223,41 @@ class PPO:
             
         # Normalizing the rewards (guard against tiny buffers / zero-variance)
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+        reward_std = rewards.std()
+        # Only normalize if std is meaningful (avoid division by near-zero)
+        if reward_std > 1e-6:
+            rewards = (rewards - rewards.mean()) / (reward_std + 1e-7)
+        else:
+            # If all rewards are the same, just center them
+            rewards = rewards - rewards.mean()
 
-        # convert list to tensor
-        old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).detach().to(device)
-        old_actions = torch.squeeze(torch.stack(self.buffer.actions, dim=0)).detach().to(device)
-        old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach().to(device)
-        old_state_values = torch.squeeze(torch.stack(self.buffer.state_values, dim=0)).detach().to(device)
+        # convert list to tensor - handle single sample edge case
+        old_states = torch.stack(self.buffer.states, dim=0).detach().to(device)
+        old_actions = torch.stack(self.buffer.actions, dim=0).detach().to(device)
+        old_logprobs = torch.stack(self.buffer.logprobs, dim=0).detach().to(device)
+        old_state_values = torch.stack(self.buffer.state_values, dim=0).detach().to(device)
+        
+        # Ensure proper shapes (batch_size, feature_dim) - don't squeeze away batch dimension
+        if old_states.dim() == 1:
+            old_states = old_states.unsqueeze(0)
+        if old_actions.dim() == 1:
+            old_actions = old_actions.unsqueeze(0)
+        if old_logprobs.dim() == 0:
+            old_logprobs = old_logprobs.unsqueeze(0)
+        if old_state_values.dim() == 0:
+            old_state_values = old_state_values.unsqueeze(0)
+        
+        # Squeeze only extra dimensions, not batch
+        old_state_values = old_state_values.squeeze(-1) if old_state_values.dim() > 1 else old_state_values
 
         # calculate advantages
         advantages = rewards.detach() - old_state_values.detach()
+        
+        # Normalize advantages for more stable training
+        if advantages.numel() > 1:
+            adv_std = advantages.std()
+            if adv_std > 1e-6:
+                advantages = (advantages - advantages.mean()) / (adv_std + 1e-7)
 
         # Optimize policy for K epochs and track losses
         policy_losses = []
@@ -236,9 +272,14 @@ class PPO:
 
             # match state_values tensor dimensions with rewards tensor
             state_values = torch.squeeze(state_values)
+            if state_values.dim() == 0:
+                state_values = state_values.unsqueeze(0)
             
             # Finding the ratio (pi_theta / pi_theta__old)
             ratios = torch.exp(logprobs - old_logprobs.detach())
+            
+            # Clamp ratios to prevent extreme values
+            ratios = torch.clamp(ratios, 0.01, 100.0)
 
             # Finding Surrogate Loss  
             surr1 = ratios * advantages
@@ -252,10 +293,28 @@ class PPO:
             # final loss of clipped objective PPO
             loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_mean
             
+            # Check for NaN before backprop
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"WARNING: NaN/Inf loss detected, skipping update")
+                continue
+            
             # take gradient step with gradient clipping for stability
             self.optimizer.zero_grad()
-            loss.mean().backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5) ### GRADIENT CLIPPING
+            loss.backward()
+            
+            # Check for NaN gradients
+            has_nan_grad = False
+            for param in self.policy.parameters():
+                if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                    has_nan_grad = True
+                    break
+            
+            if has_nan_grad:
+                print(f"WARNING: NaN/Inf gradient detected, skipping update")
+                self.optimizer.zero_grad()
+                continue
+            
+            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
             self.optimizer.step()
 
             policy_losses.append(float(policy_loss.item()))

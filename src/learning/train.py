@@ -82,23 +82,33 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
 def extract_nav_features(sim) -> np.ndarray:
     """
     Feature vector from current simulation state (robot-centric in world frame).
+    All features are normalized to roughly [-1, 1] or [0, 1] range for stable training.
+    
     Includes:
-      - relative goal position in world frame: (goal_dx, goal_dy)
-      - relative door position in world frame: (door_dx, door_dy)
-      - three closest people relative positions wrt robot: [(dx, dy) x 3] (pad with large value if <3)
-      - distances to corridor left and right boundaries (y - y_min, y_max - y)
-      - door_inflation_radius(1) - normalized door halo radius
+      - relative goal position in world frame: (goal_dx, goal_dy) / 10.0
+      - relative door position in world frame: (door_dx, door_dy) / 10.0
+      - three closest people relative positions wrt robot: [(dx, dy) x 3] / 5.0
+      - distances to corridor left and right boundaries / 2.0
+      - door_inflation_radius / 3.0
     """
     robot_pos = np.asarray(sim.robot.position, dtype=float)
     goal_pos = np.asarray(sim.robot.goal, dtype=float)
     door_pos = np.asarray(sim.robot.door_position, dtype=float)
-    large_val = 10.0
+    
+    # Normalization constants
+    POSITION_SCALE = 10.0  # Max expected relative position ~20m corridor
+    PEOPLE_SCALE = 5.0     # People typically within 5m
+    WALL_SCALE = 2.0       # Corridor width ~4m, so max wall dist ~2m
+    DOOR_RADIUS_SCALE = 3.0
+    
+    # Default value for missing people (normalized)
+    large_val_normalized = 2.0  # Represents "far away"
 
-    # Relative goal and door positions (world frame)
-    goal_dx = float(goal_pos[0] - robot_pos[0])
-    goal_dy = float(goal_pos[1] - robot_pos[1])
-    door_dx = float(door_pos[0] - robot_pos[0])
-    door_dy = float(door_pos[1] - robot_pos[1])
+    # Relative goal and door positions (world frame), normalized
+    goal_dx = float(goal_pos[0] - robot_pos[0]) / POSITION_SCALE
+    goal_dy = float(goal_pos[1] - robot_pos[1]) / POSITION_SCALE
+    door_dx = float(door_pos[0] - robot_pos[0]) / POSITION_SCALE
+    door_dy = float(door_pos[1] - robot_pos[1]) / POSITION_SCALE
 
     # Compute three closest people relative positions (dx, dy) in world frame
     rel_people: list[tuple[float, float, float]] = []  # (dist, dx, dy)
@@ -112,29 +122,29 @@ def extract_nav_features(sim) -> np.ndarray:
                 rel_people.append((d, dx, dy))
     
     rel_people.sort(key=lambda t: t[0])
-    # Take up to 3, pad if fewer
+    # Take up to 3, pad if fewer (normalized)
     rel_feats: list[float] = []
     for i in range(3):
         if i < len(rel_people):
             _, dx, dy = rel_people[i]
-            rel_feats.extend([dx, dy])
+            rel_feats.extend([dx / PEOPLE_SCALE, dy / PEOPLE_SCALE])
         else:
-            rel_feats.extend([large_val, large_val])
+            rel_feats.extend([large_val_normalized, large_val_normalized])
 
-    # Distances to corridor left/right sides using world y-bounds
-    dist_left = float(large_val)
-    dist_right = float(large_val)
+    # Distances to corridor left/right sides using world y-bounds (normalized)
+    dist_left = large_val_normalized
+    dist_right = large_val_normalized
     if hasattr(sim.robot, 'corridor_bounds'):
         bounds = sim.robot.corridor_bounds
         y_min = float(bounds['y_min'])
         y_max = float(bounds['y_max'])
         y = float(robot_pos[1])
-        dist_left = max(0.0, y - y_min)
-        dist_right = max(0.0, y_max - y)
+        dist_left = max(0.0, y - y_min) / WALL_SCALE
+        dist_right = max(0.0, y_max - y) / WALL_SCALE
 
-    # Door inflation radius (normalized by max expected value of 3.0m)
+    # Door inflation radius (normalized)
     door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
-    door_inflation_radius_normalized = door_inflation_radius / 3.0
+    door_inflation_radius_normalized = door_inflation_radius / DOOR_RADIUS_SCALE
 
     feat: list[float] = []
     # Goal relative position (most important)
@@ -350,61 +360,158 @@ def check_robot_overlap(sim) -> dict:
     }
 
 
-def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple[float, float, dict]:
+def compute_min_obstacle_distance(sim) -> tuple[float, float]:
     """
-    Reward focused on obstacle avoidance with better credit assignment.
+    Compute minimum distances to obstacles for reward shaping.
     
-    Key improvements:
-    1. Progress component (small) to ensure episodes complete
-    2. Obstacle-based rewards (primary signal)
-    3. Offset regularization to encourage meaningful corrections
+    Returns:
+        (min_person_distance, min_door_distance) - distances to closest obstacles
+    """
+    robot_pos = sim.robot.position
+    robot_radius = sim.robot.radius
     
-    Returns (reward, new_progress_distance, info)
+    # Minimum distance to any person's proxemic zone
+    min_person_dist = float('inf')
+    for person in sim.robot.people:
+        if not person.active:
+            continue
+        
+        # Get person's proxemic ellipse parameters
+        axes = getattr(person, 'proxemic_axes', np.array([person.radius, person.radius], dtype=float)).astype(float)
+        a = max(float(axes[0]), 1e-4)  # semi-minor axis (width)
+        b = max(float(axes[1]), 1e-4)  # semi-major axis (length)
+        
+        # Simple distance to person center (approximation for shaping)
+        dist_to_person = float(np.linalg.norm(robot_pos - person.position)) - robot_radius - max(a, b)
+        min_person_dist = min(min_person_dist, dist_to_person)
+    
+    # Distance to door
+    min_door_dist = float('inf')
+    if hasattr(sim.robot, 'door_position') and hasattr(sim.robot, 'corridor_bounds'):
+        door_pos = np.array(sim.robot.door_position, dtype=float)
+        bounds = sim.robot.corridor_bounds
+        door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
+        
+        # Vector from door to robot
+        v = robot_pos - door_pos
+        dist_to_door = float(np.linalg.norm(v))
+        
+        # Check if robot is on the inward-facing side
+        corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
+        door_side = "left" if door_pos[1] < corridor_mid_y else "right"
+        n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
+        
+        dot_product = np.dot(n_world, v)
+        if dot_product > 0:  # Robot is on the inward-facing side
+            min_door_dist = dist_to_door - door_inflation_radius - robot_radius
+        else:
+            min_door_dist = float('inf')  # Not on the relevant side
+    
+    return min_person_dist, min_door_dist
+
+
+def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, 
+                   prev_collision_count: int = 0) -> tuple[float, float, int, dict]:
+    """
+    Reward function with proper credit assignment for obstacle avoidance.
+    
+    Components:
+    1. Progress reward: Encourage moving toward goal
+    2. Obstacle avoidance: Positive reward for staying clear, penalty for overlap
+    3. Distance-based shaping: Continuous signal as robot approaches obstacles
+    4. Collision penalty: Large penalty for actual collisions
+    
+    Returns (reward, new_distance, new_collision_count, info)
     """
     robot_pos = sim.robot.position
     goal_pos = sim.robot.goal
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
-    reward = 0
-    # Check overlap with inflation zones
-    overlap_info = check_robot_overlap(sim)
+    reward = 0.0
     
-    # PRIMARY SIGNAL: Obstacle-based rewards
+    # ==========================================================================
+    # 1. PROGRESS REWARD - Encourage moving toward goal
+    # ==========================================================================
+    progress = progress_prev_dist - dist  # Positive if moving toward goal
+    progress_reward = progress * 0.5  # Scale factor for progress
+    reward += progress_reward
+    
+    # ==========================================================================
+    # 2. OBSTACLE OVERLAP REWARD - Primary avoidance signal
+    # ==========================================================================
+    overlap_info = check_robot_overlap(sim)
     overlap_type = overlap_info['overlap_type']
+    
     if overlap_type == 'none':
-        # Positive reward for staying in free space
-        reward = -0.1
+        # POSITIVE reward for staying in free space
+        overlap_reward = 0.1
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        reward = -1.0  # Increased penalty to make signal stronger
+        overlap_reward = -1.0
     elif overlap_type == 'door':
         # Penalty for being in door's inflation zone
-        reward = -1.0  # Same as person overlap
+        overlap_reward = -1.0
     elif overlap_type == 'both':
-        # Higher penalty for being in both zones simultaneously
-        reward = -2.0  # Worse than individual overlaps
+        # Larger penalty for being in both zones
+        overlap_reward = -2.0
     else:
-        reward = -0.1
-
-    # Hard collision penalty (critical - must avoid)
-    collisions = sim.collision_count
+        overlap_reward = 0.0
+    
+    reward += overlap_reward
+    
+    # ==========================================================================
+    # 3. DISTANCE-BASED SHAPING - Continuous signal before overlap occurs
+    # ==========================================================================
+    min_person_dist, min_door_dist = compute_min_obstacle_distance(sim)
+    
+    # Shaping zone: give continuous reward based on proximity to obstacles
+    # This helps the agent learn to keep distance BEFORE entering overlap zone
+    shaping_threshold = 2.0  # Start shaping within 2m of obstacles
+    
+    shaping_reward = 0.0
+    if min_person_dist < shaping_threshold and min_person_dist > 0:
+        # Closer to person = more negative (linear shaping)
+        shaping_reward += -0.1 * (1.0 - min_person_dist / shaping_threshold)
+    
+    if min_door_dist < shaping_threshold and min_door_dist > 0:
+        # Closer to door = more negative
+        shaping_reward += -0.1 * (1.0 - min_door_dist / shaping_threshold)
+    
+    reward += shaping_reward
+    
+    # ==========================================================================
+    # 4. COLLISION PENALTY - Large penalty for actual physical collisions
+    # ==========================================================================
+    current_collision_count = sim.collision_count
+    new_collisions = current_collision_count - prev_collision_count
+    
+    if new_collisions > 0:
+        reward += -5.0 * new_collisions  # Large penalty per collision
+    
+    # ==========================================================================
+    # 5. GOAL REACHED BONUS
+    # ==========================================================================
+    if dist < 1.0:  # Goal reached
+        reward += 10.0  # Large positive reward for completing the task
+    
+    # Build info dict
     info = {
         'distance': dist,
-        'collisions': collisions,
+        'collisions': current_collision_count,
+        'new_collisions': new_collisions,
         'overlap_type': overlap_type,
         'person_overlap': overlap_info['person_overlap'],
         'door_overlap': overlap_info['door_overlap'],
+        'min_person_dist': min_person_dist if min_person_dist != float('inf') else -1.0,
+        'min_door_dist': min_door_dist if min_door_dist != float('inf') else -1.0,
         'offset': offset,
         'offset_abs': abs(offset),
+        'progress_reward': progress_reward,
+        'overlap_reward': overlap_reward,
+        'shaping_reward': shaping_reward,
     }
-    
-    # If a collision occurred in this step
-    if sim.collision_history:
-        if abs(sim.collision_history[-1]['timestamp'] - __import__('datetime').datetime.now().timestamp()) < 0.2:
-            reward += -1.0  # Large penalty for actual collision
-    
 
-    return reward, dist, info
+    return reward, dist, current_collision_count, info
 
 
 def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str] = None) -> float:
@@ -506,10 +613,12 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         robot_pos = sim.robot.position
         goal_pos = sim.robot.goal
         prev_dist = float(np.linalg.norm(goal_pos - robot_pos))
+        prev_collision_count = 0  # Track collisions for delta calculation
 
         episode_return = 0.0
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
         offset_history = []  # Track offsets for analysis
+        reward_components = {'progress': 0.0, 'overlap': 0.0, 'shaping': 0.0}  # Track reward breakdown
 
         # Storage for action repetition
         prev_offset = None
@@ -551,12 +660,19 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             # Step simulation
             _, _, done_flag = sim.step(dt)
 
-            # Reward (pass offset for regularization)
-            reward, prev_dist, info = compute_reward(sim, prev_dist, offset)
+            # Reward with all components
+            reward, prev_dist, prev_collision_count, info = compute_reward(
+                sim, prev_dist, offset, prev_collision_count
+            )
             episode_return += reward
 
             # Track overlap statistics
             overlap_counts[info['overlap_type']] += 1
+            
+            # Track reward component breakdown
+            reward_components['progress'] += info['progress_reward']
+            reward_components['overlap'] += info['overlap_reward']
+            reward_components['shaping'] += info['shaping_reward']
 
             # PPO bookkeeping
             agent.buffer.rewards.append(float(reward))
@@ -605,18 +721,25 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
         print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
         print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
+        print(f"  Rewards - Progress: {reward_components['progress']:.2f} | Overlap: {reward_components['overlap']:.2f} | Shaping: {reward_components['shaping']:.2f}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
-        print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±30°)")
+        print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±60°)")
 
         if use_wandb and wandb is not None:
             wandb.log({
                 'episode': ep + 1,
                 'return': episode_return,
                 'steps': total_steps,
+                # Reward breakdown
+                'reward_progress': reward_components['progress'],
+                'reward_overlap': reward_components['overlap'],
+                'reward_shaping': reward_components['shaping'],
+                # Overlap statistics
                 'overlap_free_pct': overlap_pct['none'],
                 'overlap_person_pct': overlap_pct['person'],
                 'overlap_door_pct': overlap_pct['door'],
                 'overlap_both_pct': overlap_pct['both'],
+                # Offset statistics
                 'avg_abs_offset_deg': avg_abs_offset_deg,
                 'max_abs_offset_deg': max_abs_offset_deg,
                 'elapsed_min': (time.time() - start_time) / 60.0,
