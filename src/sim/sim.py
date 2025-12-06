@@ -87,6 +87,13 @@ class Simulation:
         self.previous_position = None
         self.collision_count = 0
         self.collision_history = []  # Track collision timestamps and details
+        
+        # New metrics for comparison
+        self.overlap_time_persons = 0.0  # Time spent overlapping with persons (within threshold)
+        self.overlap_time_door = 0.0     # Time spent in door inflation zone
+        self.overlap_time_both = 0.0     # Time spent overlapping with both
+        self.min_clearance_to_door = float('inf')  # Minimum clearance to door position
+        self.person_overlap_threshold = 1.0  # Distance threshold for person overlap (m)
 
     def get_door_position(self) -> Tuple[float, float]:
         """Returns the precise (x,y) world coordinates of the door"""
@@ -355,6 +362,40 @@ class Simulation:
         if done and self.goal_reached_time is None:
             self.goal_reached_time = elapsed_time
         
+        # =====================================================================
+        # Track overlap metrics for comparison
+        # =====================================================================
+        robot_pos = self.robot.position
+        robot_radius = self.robot.radius
+        
+        # Check overlap with persons (within threshold distance)
+        in_person_overlap = False
+        for person in self.people:
+            if not person.active:
+                continue
+            dist_to_person = np.linalg.norm(robot_pos - person.position) - robot_radius - person.radius
+            if dist_to_person < self.person_overlap_threshold:
+                in_person_overlap = True
+                break
+        
+        # Check overlap with door inflation zone
+        door_pos = np.array(self.get_door_position())
+        dist_to_door = np.linalg.norm(robot_pos - door_pos)
+        in_door_overlap = dist_to_door < self.door_halo_radius
+        
+        # Track minimum clearance to door
+        clearance_to_door = dist_to_door - robot_radius
+        if clearance_to_door < self.min_clearance_to_door:
+            self.min_clearance_to_door = clearance_to_door
+        
+        # Accumulate overlap times
+        if in_person_overlap:
+            self.overlap_time_persons += dt
+        if in_door_overlap:
+            self.overlap_time_door += dt
+        if in_person_overlap and in_door_overlap:
+            self.overlap_time_both += dt
+        
         # Store data point
         data_point = {
             'timestamp': current_time.isoformat(),
@@ -368,6 +409,9 @@ class Simulation:
             'goal_reached': done,
             'num_people': len(self.people),
             'collision_count': self.collision_count,
+            'in_person_overlap': in_person_overlap,
+            'in_door_overlap': in_door_overlap,
+            'clearance_to_door': clearance_to_door,
             'dt': dt
         }
         
@@ -398,6 +442,11 @@ class Simulation:
         # Get total simulation time
         total_time = self.simulation_data[-1]['elapsed_time'] if self.simulation_data else 0.0
         
+        # Min clearance to door (handle inf case)
+        min_door_clearance = self.min_clearance_to_door
+        if min_door_clearance == float('inf'):
+            min_door_clearance = -1.0  # Indicates never measured
+        
         return {
             'total_simulation_time': total_time,
             'time_to_reach_goal': time_to_goal,
@@ -405,7 +454,12 @@ class Simulation:
             'total_distance_traveled': final_distance,
             'goal_reached': self.goal_reached_time is not None,
             'total_collisions': self.collision_count,
-            'total_data_points': len(self.simulation_data)
+            'total_data_points': len(self.simulation_data),
+            # New comparison metrics
+            'overlap_time_persons': self.overlap_time_persons,
+            'overlap_time_door': self.overlap_time_door,
+            'overlap_time_both': self.overlap_time_both,
+            'min_clearance_to_door': min_door_clearance
         }
     
     def export_data_to_csv(self, filename: str = None):
@@ -470,3 +524,8 @@ class Simulation:
         self.previous_position = None
         self.collision_count = 0
         self.collision_history = []
+        # Reset comparison metrics
+        self.overlap_time_persons = 0.0
+        self.overlap_time_door = 0.0
+        self.overlap_time_both = 0.0
+        self.min_clearance_to_door = float('inf')

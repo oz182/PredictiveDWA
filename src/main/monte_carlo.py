@@ -45,7 +45,8 @@ class MonteCarloRunner:
                  mode: str = "default",
                  model_path: Optional[str] = None,
                  action_select_interval: int = 1,
-                 render: bool = False):
+                 render: bool = False,
+                 seed: Optional[int] = None):
         """
         Initialize Monte Carlo runner
         
@@ -60,6 +61,8 @@ class MonteCarloRunner:
             model_path: Path to trained PPO model (required if mode="learned")
             action_select_interval: How often to select new action in learned mode
             render: Whether to render the simulation (slower but visual)
+            seed: Base random seed for reproducibility. Each run uses seed + run_id.
+                  If None, uses current time (non-reproducible).
         """
         self.num_runs = num_runs
         self.corridor_width = corridor_width
@@ -71,6 +74,7 @@ class MonteCarloRunner:
         self.model_path = model_path
         self.action_select_interval = action_select_interval
         self.render = render
+        self.base_seed = seed
         
         # Results storage
         self.run_results: List[Dict[str, Any]] = []
@@ -122,13 +126,34 @@ class MonteCarloRunner:
         self.extract_nav_features = extract_nav_features
         print("Model loaded successfully!")
 
+    def _set_seed(self, run_id: int):
+        """Set random seeds for reproducibility.
+        
+        Args:
+            run_id: Current run ID (0-indexed). Combined with base_seed for unique per-run seed.
+        """
+        if self.base_seed is not None:
+            seed = self.base_seed + run_id
+        else:
+            # Use time-based seed if no base seed provided
+            seed = int(time.time()) + run_id
+        
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        return seed
+
     def generate_people_speeds(self) -> List[float]:
         """Generate random people speeds for a single run"""
         return [random.uniform(*self.people_speed_range) for _ in range(self.num_people)]
     
     def run_single_simulation(self, run_id: int) -> Dict[str, Any]:
         """Run a single simulation and return results"""
-        print(f"  Starting run {run_id + 1}/{self.num_runs} [{self.mode}]...")
+        # Set seeds for reproducibility BEFORE generating any random values
+        seed_used = self._set_seed(run_id)
+        
+        print(f"  Starting run {run_id + 1}/{self.num_runs} [{self.mode}] (seed={seed_used})...")
         
         # Create simulation with random people speeds
         people_speeds = self.generate_people_speeds()
@@ -158,8 +183,12 @@ class MonteCarloRunner:
         step_count = 0
         prev_offset = None  # For learned mode
         cancelled = False
+        termination_reason = "timeout"  # Default: timeout
+        wall_collision = False
         
         while time.time() - start_time < self.max_simulation_time:
+            elapsed = time.time() - start_time
+            
             # Handle rendering timing and events
             if self.render:
                 import pygame
@@ -195,6 +224,20 @@ class MonteCarloRunner:
             state, reward, done = sim.step(dt)
             step_count += 1
             
+            # Check for wall collision
+            robot_pos = sim.robot.position
+            robot_radius = sim.robot.radius
+            bounds = sim.corridor_bounds
+            
+            if (robot_pos[0] - robot_radius <= bounds['x_min'] or
+                robot_pos[0] + robot_radius >= bounds['x_max'] or
+                robot_pos[1] - robot_radius <= bounds['y_min'] or
+                robot_pos[1] + robot_radius >= bounds['y_max']):
+                wall_collision = True
+                termination_reason = "wall_collision"
+                print(f"    ✗ Wall collision at {elapsed:.2f}s")
+                break
+            
             # Render if enabled
             if self.render and screen is not None:
                 import pygame
@@ -208,10 +251,14 @@ class MonteCarloRunner:
                 pygame.display.flip()
             
             if done:
-                print(f"    ✓ Goal reached in {time.time() - start_time:.2f}s")
+                termination_reason = "goal_reached"
+                print(f"    ✓ Goal reached in {elapsed:.2f}s")
                 break
         
+        # Check if terminated due to timeout
         simulation_time = time.time() - start_time
+        if termination_reason == "timeout":
+            print(f"    ✗ Timeout after {simulation_time:.2f}s")
         
         # Cleanup rendering
         if self.render:
@@ -230,6 +277,15 @@ class MonteCarloRunner:
         # Get simulation summary
         summary = sim.get_simulation_summary()
         
+        # Override goal_reached based on actual termination reason
+        if termination_reason != "goal_reached":
+            summary['goal_reached'] = False
+            summary['time_to_reach_goal'] = None
+        
+        # Add termination info to summary
+        summary['termination_reason'] = termination_reason
+        summary['wall_collision'] = wall_collision
+        
         # Export data for this run (include mode in filename)
         filename = f"mc_{self.mode}_run_{run_id + 1:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         csv_path = sim.export_data_to_csv(filename)
@@ -238,6 +294,8 @@ class MonteCarloRunner:
         result = {
             'run_id': run_id + 1,
             'mode': self.mode,
+            'seed': seed_used,
+            'termination_reason': termination_reason,
             'simulation_time': simulation_time,
             'step_count': step_count,
             'people_speeds': people_speeds,
@@ -247,7 +305,7 @@ class MonteCarloRunner:
         
         print(f"    Completed: {simulation_time:.2f}s, {step_count} steps, "
               f"{summary['total_collisions']} collisions, "
-              f"{'Goal reached' if summary['goal_reached'] else 'Goal not reached'}")
+              f"termination: {termination_reason}")
         
         return result
     
@@ -265,6 +323,7 @@ class MonteCarloRunner:
         print(f"  People speed range: {self.people_speed_range[0]}-{self.people_speed_range[1]} m/s")
         print(f"  Max simulation time: {self.max_simulation_time}s")
         print(f"  Render: {'enabled' if self.render else 'disabled'}")
+        print(f"  Base seed: {self.base_seed if self.base_seed is not None else 'time-based (non-reproducible)'}")
         print("-" * 60)
         
         self.start_time = time.time()
@@ -359,6 +418,17 @@ class MonteCarloRunner:
         print(f"Successful runs: {stats['successful_runs']}")
         print(f"Success rate: {stats['success_rate']:.1f}%")
         
+        # Termination reasons breakdown
+        term_reasons = [r['summary'].get('termination_reason', 'unknown') for r in self.run_results]
+        goal_reached_count = term_reasons.count('goal_reached')
+        wall_collision_count = term_reasons.count('wall_collision')
+        timeout_count = term_reasons.count('timeout')
+        
+        print(f"\nTermination Reasons:")
+        print(f"  Goal reached: {goal_reached_count}")
+        print(f"  Wall collision: {wall_collision_count}")
+        print(f"  Timeout: {timeout_count}")
+        
         print(f"\nSimulation Time (seconds):")
         print(f"  Mean: {stats['simulation_time']['mean']:.2f}")
         print(f"  Median: {stats['simulation_time']['median']:.2f}")
@@ -384,20 +454,48 @@ class MonteCarloRunner:
         print(f"  Std Dev: {stats['distance_traveled']['std']:.2f}")
         print(f"  Range: {stats['distance_traveled']['min']:.2f} - {stats['distance_traveled']['max']:.2f}")
         
+        # New comparison metrics
+        overlap_persons = [r['summary'].get('overlap_time_persons', 0) for r in self.run_results]
+        overlap_door = [r['summary'].get('overlap_time_door', 0) for r in self.run_results]
+        overlap_both = [r['summary'].get('overlap_time_both', 0) for r in self.run_results]
+        min_door_clearances = [r['summary'].get('min_clearance_to_door', -1) for r in self.run_results 
+                               if r['summary'].get('min_clearance_to_door', -1) >= 0]
+        
+        print(f"\nOverlap Time with Persons (seconds):")
+        print(f"  Mean: {statistics.mean(overlap_persons):.3f}")
+        print(f"  Total: {sum(overlap_persons):.3f}")
+        
+        print(f"\nOverlap Time in Door Zone (seconds):")
+        print(f"  Mean: {statistics.mean(overlap_door):.3f}")
+        print(f"  Total: {sum(overlap_door):.3f}")
+        
+        print(f"\nOverlap Time Both (seconds):")
+        print(f"  Mean: {statistics.mean(overlap_both):.3f}")
+        print(f"  Total: {sum(overlap_both):.3f}")
+        
+        if min_door_clearances:
+            print(f"\nMin Clearance to Door (meters):")
+            print(f"  Mean: {statistics.mean(min_door_clearances):.3f}")
+            print(f"  Min: {min(min_door_clearances):.3f}")
+        
         print(f"\nIndividual Run Results:")
-        print(f"{'Run':<4} {'Time(s)':<8} {'Steps':<6} {'Collisions':<10} {'Goal':<5} {'Avg Vel':<8}")
-        print("-" * 50)
+        print(f"{'Run':<4} {'Time(s)':<10} {'Dist(m)':<10} {'Avg Vel':<10} {'Ovlp Pers':<10} {'Ovlp Door':<10} {'MinDoorClr':<10} {'Termination':<15}")
+        print("-" * 95)
         
         for result in self.run_results:
             summary = result['summary']
+            time_to_goal = summary.get('time_to_reach_goal') if summary.get('time_to_reach_goal') else result['simulation_time']
+            termination = summary.get('termination_reason', 'unknown')
             print(f"{result['run_id']:<4} "
-                  f"{result['simulation_time']:<8.2f} "
-                  f"{result['step_count']:<6} "
-                  f"{summary['total_collisions']:<10} "
-                  f"{'Yes' if summary['goal_reached'] else 'No':<5} "
-                  f"{summary['average_velocity']:<8.3f}")
+                  f"{time_to_goal:<10.2f} "
+                  f"{summary['total_distance_traveled']:<10.2f} "
+                  f"{summary['average_velocity']:<10.3f} "
+                  f"{summary.get('overlap_time_persons', 0):<10.3f} "
+                  f"{summary.get('overlap_time_door', 0):<10.3f} "
+                  f"{summary.get('min_clearance_to_door', -1):<10.3f} "
+                  f"{termination:<15}")
         
-        print("=" * 80)
+        print("=" * 95)
     
     def export_summary_csv(self, filename: str = None):
         """Export summary statistics to CSV"""
@@ -424,9 +522,26 @@ class MonteCarloRunner:
             
             with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = [
-                    'run_id', 'mode', 'simulation_time', 'step_count', 'goal_reached',
-                    'total_collisions', 'average_velocity', 'total_distance_traveled',
-                    'people_speeds', 'csv_path'
+                    'run_id', 
+                    'mode',
+                    'seed',
+                    'goal_reached',
+                    'termination_reason',
+                    'wall_collision',
+                    # Key comparison metrics
+                    'time_to_goal',
+                    'total_distance_traveled',
+                    'average_velocity',
+                    'overlap_time_persons',
+                    'overlap_time_door',
+                    'overlap_time_both',
+                    'min_clearance_to_door',
+                    # Additional info
+                    'total_collisions',
+                    'step_count',
+                    'simulation_time',
+                    'people_speeds',
+                    'csv_path'
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 
@@ -437,12 +552,22 @@ class MonteCarloRunner:
                     writer.writerow({
                         'run_id': result['run_id'],
                         'mode': result.get('mode', self.mode),
-                        'simulation_time': result['simulation_time'],
-                        'step_count': result['step_count'],
+                        'seed': result.get('seed', -1),
                         'goal_reached': summary['goal_reached'],
-                        'total_collisions': summary['total_collisions'],
-                        'average_velocity': summary['average_velocity'],
+                        'termination_reason': summary.get('termination_reason', 'unknown'),
+                        'wall_collision': summary.get('wall_collision', False),
+                        # Key comparison metrics
+                        'time_to_goal': summary.get('time_to_reach_goal') if summary.get('time_to_reach_goal') else -1,
                         'total_distance_traveled': summary['total_distance_traveled'],
+                        'average_velocity': summary['average_velocity'],
+                        'overlap_time_persons': summary.get('overlap_time_persons', 0.0),
+                        'overlap_time_door': summary.get('overlap_time_door', 0.0),
+                        'overlap_time_both': summary.get('overlap_time_both', 0.0),
+                        'min_clearance_to_door': summary.get('min_clearance_to_door', -1.0),
+                        # Additional info
+                        'total_collisions': summary['total_collisions'],
+                        'step_count': result['step_count'],
+                        'simulation_time': result['simulation_time'],
                         'people_speeds': str(result['people_speeds']),
                         'csv_path': result['csv_path']
                     })
@@ -479,6 +604,10 @@ Examples:
 
   # Run with visualization enabled (slower)
   python monte_carlo.py --runs 5 --mode learned --render
+
+  # Run with fixed seed for reproducibility (compare methods with same scenarios)
+  python monte_carlo.py --runs 10 --mode default --seed 42 --export-summary
+  python monte_carlo.py --runs 10 --mode learned --seed 42 --export-summary
         """
     )
     
@@ -499,7 +628,9 @@ Examples:
     parser.add_argument('--num-people', type=int, default=3, help='Number of people (default: 3)')
     parser.add_argument('--people-speed-min', type=float, default=0.6, help='Minimum people speed (default: 0.6)')
     parser.add_argument('--people-speed-max', type=float, default=1.2, help='Maximum people speed (default: 1.2)')
-    parser.add_argument('--max-time', type=float, default=60.0, help='Maximum simulation time per run (default: 60.0)')
+    parser.add_argument('--max-time', type=float, default=30.0, help='Maximum simulation time per run in seconds (default: 30.0)')
+    parser.add_argument('--seed', type=int, default=None, 
+                        help='Base random seed for reproducibility. Run i uses seed+i. (default: time-based)')
     parser.add_argument('--render', action='store_true', help='Enable visualization (slower)')
     parser.add_argument('--export-summary', action='store_true', help='Export summary statistics to CSV')
     
@@ -516,7 +647,8 @@ Examples:
         mode=args.mode,
         model_path=args.model,
         action_select_interval=args.action_select_interval,
-        render=args.render
+        render=args.render,
+        seed=args.seed
     )
     
     runner.run_monte_carlo()
