@@ -2,6 +2,20 @@
 """
 Monte Carlo Simulation Runner for Predictive DWA
 Runs multiple simulations without GUI/display and records data for analysis
+
+Supports two modes:
+  - default: Standard simulation using robot.py's configured navigator
+  - learned: Uses trained PPO model to control heading offset (like test.py)
+
+Usage:
+  # Run with default navigator (configured in robot.py)
+  python monte_carlo.py --runs 10 --mode default
+
+  # Run with learned model
+  python monte_carlo.py --runs 10 --mode learned --model checkpoints/theta_qnet.pt
+
+  # Run learned model with custom action interval
+  python monte_carlo.py --runs 10 --mode learned --action-select-interval 5
 """
 
 import sys
@@ -10,8 +24,12 @@ import time
 import random
 import argparse
 import statistics
+import math
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+import numpy as np
+import torch
 
 # Add the src directory to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -23,7 +41,11 @@ class MonteCarloRunner:
     def __init__(self, num_runs: int = 10, corridor_width: float = 4.0, 
                  door_side: str = "right", num_people: int = 3,
                  people_speed_range: tuple = (0.6, 1.2), 
-                 max_simulation_time: float = 60.0):
+                 max_simulation_time: float = 60.0,
+                 mode: str = "default",
+                 model_path: Optional[str] = None,
+                 action_select_interval: int = 1,
+                 render: bool = False):
         """
         Initialize Monte Carlo runner
         
@@ -34,6 +56,10 @@ class MonteCarloRunner:
             num_people: Number of people in each simulation
             people_speed_range: Tuple of (min_speed, max_speed) for people
             max_simulation_time: Maximum time per simulation (seconds)
+            mode: "default" for standard simulation, "learned" for PPO model
+            model_path: Path to trained PPO model (required if mode="learned")
+            action_select_interval: How often to select new action in learned mode
+            render: Whether to render the simulation (slower but visual)
         """
         self.num_runs = num_runs
         self.corridor_width = corridor_width
@@ -41,19 +67,68 @@ class MonteCarloRunner:
         self.num_people = num_people
         self.people_speed_range = people_speed_range
         self.max_simulation_time = max_simulation_time
+        self.mode = mode
+        self.model_path = model_path
+        self.action_select_interval = action_select_interval
+        self.render = render
         
         # Results storage
         self.run_results: List[Dict[str, Any]] = []
         self.start_time = None
         self.end_time = None
         
+        # Learned mode: load the PPO agent
+        self.agent = None
+        self.extract_nav_features = None
+        if self.mode == "learned":
+            self._load_learned_model()
+        
+    def _load_learned_model(self):
+        """Load the trained PPO model for learned mode."""
+        from agents.ppo import PPO
+        from learning.train import extract_nav_features
+        
+        if self.model_path is None:
+            # Default path
+            self.model_path = os.path.join(
+                os.path.dirname(__file__), '..', 'learning', 'checkpoints', 'theta_qnet.pt'
+            )
+        
+        print(f"Loading learned model from: {self.model_path}")
+        
+        # Infer input dimension using a temporary simulation
+        tmp_sim = Simulation(
+            corridor_width=self.corridor_width,
+            door_side=self.door_side,
+            num_people=3,
+            people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)]
+        )
+        _ = tmp_sim.step(1/60.0)
+        input_dim = int(len(extract_nav_features(tmp_sim)))
+        
+        # Instantiate PPO agent and load checkpoint
+        self.agent = PPO(
+            state_dim=input_dim,
+            action_dim=1,  # Single offset value
+            lr_actor=1e-3,
+            lr_critic=1e-3,
+            gamma=0.99,
+            K_epochs=10,
+            eps_clip=0.2,
+            has_continuous_action_space=True,
+            action_std_init=0.4,
+        )
+        self.agent.load(self.model_path)
+        self.extract_nav_features = extract_nav_features
+        print("Model loaded successfully!")
+
     def generate_people_speeds(self) -> List[float]:
         """Generate random people speeds for a single run"""
         return [random.uniform(*self.people_speed_range) for _ in range(self.num_people)]
     
     def run_single_simulation(self, run_id: int) -> Dict[str, Any]:
         """Run a single simulation and return results"""
-        print(f"  Starting run {run_id + 1}/{self.num_runs}...")
+        print(f"  Starting run {run_id + 1}/{self.num_runs} [{self.mode}]...")
         
         # Create simulation with random people speeds
         people_speeds = self.generate_people_speeds()
@@ -64,14 +139,73 @@ class MonteCarloRunner:
             people_speeds=people_speeds
         )
         
+        # Warm-up step to initialize internal state
+        _ = sim.step(1/60.0)
+        
+        # Initialize rendering if enabled
+        screen = None
+        clock = None
+        if self.render:
+            import pygame
+            pygame.init()
+            width, height = 1000, 400
+            screen = pygame.display.set_mode((width, height))
+            pygame.display.set_caption(f"Monte Carlo Run {run_id + 1}/{self.num_runs} [{self.mode}]")
+            clock = pygame.time.Clock()
+        
         # Run simulation
         start_time = time.time()
         step_count = 0
-        dt = 1.0 / 60.0  # Fixed timestep for consistency
+        prev_offset = None  # For learned mode
+        cancelled = False
         
         while time.time() - start_time < self.max_simulation_time:
+            # Handle rendering timing and events
+            if self.render:
+                import pygame
+                dt = clock.tick(60) / 1000.0  # Delta time in seconds
+                
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        cancelled = True
+                        break
+            else:
+                dt = 1.0 / 60.0  # Fixed timestep for consistency
+            
+            if cancelled:
+                break
+            
+            # Apply learned offset if in learned mode
+            if self.mode == "learned" and self.agent is not None:
+                feat = self.extract_nav_features(sim)
+                
+                # Select new action based on interval
+                if (step_count % self.action_select_interval == 0) or (prev_offset is None):
+                    offset_normalized = self.agent.select_action(feat)
+                    prev_offset = float(offset_normalized[0])
+                
+                # Scale offset from [-1, 1] to [-π/6, π/6] (±30 degrees)
+                max_offset = math.pi / 6
+                offset = prev_offset * max_offset
+                
+                # Apply offset to planner
+                if hasattr(sim.robot, 'nav'):
+                    sim.robot.nav.agent_offset = offset
+            
             state, reward, done = sim.step(dt)
             step_count += 1
+            
+            # Render if enabled
+            if self.render and screen is not None:
+                import pygame
+                screen.fill((255, 255, 255))
+                if self.mode == "learned":
+                    # Pass state features for visualization
+                    feat = self.extract_nav_features(sim) if self.extract_nav_features else None
+                    sim.draw_v0(screen, state_input=feat)
+                else:
+                    sim.draw_v0(screen)
+                pygame.display.flip()
             
             if done:
                 print(f"    ✓ Goal reached in {time.time() - start_time:.2f}s")
@@ -79,16 +213,31 @@ class MonteCarloRunner:
         
         simulation_time = time.time() - start_time
         
+        # Cleanup rendering
+        if self.render:
+            import pygame
+            pygame.quit()
+        
+        # Clear agent buffer if in learned mode
+        if self.mode == "learned" and self.agent is not None:
+            self.agent.buffer.clear()
+        
+        # Handle cancelled simulation
+        if cancelled:
+            print(f"    ✗ Run cancelled by user")
+            return None
+        
         # Get simulation summary
         summary = sim.get_simulation_summary()
         
-        # Export data for this run
-        filename = f"mc_run_{run_id + 1:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # Export data for this run (include mode in filename)
+        filename = f"mc_{self.mode}_run_{run_id + 1:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         csv_path = sim.export_data_to_csv(filename)
         
         # Compile results
         result = {
             'run_id': run_id + 1,
+            'mode': self.mode,
             'simulation_time': simulation_time,
             'step_count': step_count,
             'people_speeds': people_speeds,
@@ -106,11 +255,16 @@ class MonteCarloRunner:
         """Run all Monte Carlo simulations"""
         print(f"Starting Monte Carlo simulation with {self.num_runs} runs...")
         print(f"Parameters:")
+        print(f"  Mode: {self.mode}")
+        if self.mode == "learned":
+            print(f"  Model path: {self.model_path}")
+            print(f"  Action select interval: {self.action_select_interval}")
         print(f"  Corridor width: {self.corridor_width}m")
         print(f"  Door side: {self.door_side}")
         print(f"  Number of people: {self.num_people}")
         print(f"  People speed range: {self.people_speed_range[0]}-{self.people_speed_range[1]} m/s")
         print(f"  Max simulation time: {self.max_simulation_time}s")
+        print(f"  Render: {'enabled' if self.render else 'disabled'}")
         print("-" * 60)
         
         self.start_time = time.time()
@@ -118,7 +272,10 @@ class MonteCarloRunner:
         for i in range(self.num_runs):
             try:
                 result = self.run_single_simulation(i)
-                self.run_results.append(result)
+                if result is not None:  # Skip cancelled runs
+                    self.run_results.append(result)
+                else:
+                    print(f"  Skipping cancelled run {i + 1}")
             except Exception as e:
                 print(f"  ❌ Run {i + 1} failed: {e}")
                 # Continue with next run
@@ -195,7 +352,7 @@ class MonteCarloRunner:
             return
         
         print("\n" + "=" * 80)
-        print("MONTE CARLO SIMULATION SUMMARY")
+        print(f"MONTE CARLO SIMULATION SUMMARY ({self.mode.upper()} MODE)")
         print("=" * 80)
         
         print(f"Total runs: {stats['total_runs']}")
@@ -250,7 +407,7 @@ class MonteCarloRunner:
         
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"monte_carlo_summary_{timestamp}.csv"
+            filename = f"monte_carlo_{self.mode}_summary_{timestamp}.csv"
         
         if not filename.endswith('.csv'):
             filename += '.csv'
@@ -267,7 +424,7 @@ class MonteCarloRunner:
             
             with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = [
-                    'run_id', 'simulation_time', 'step_count', 'goal_reached',
+                    'run_id', 'mode', 'simulation_time', 'step_count', 'goal_reached',
                     'total_collisions', 'average_velocity', 'total_distance_traveled',
                     'people_speeds', 'csv_path'
                 ]
@@ -279,6 +436,7 @@ class MonteCarloRunner:
                     summary = result['summary']
                     writer.writerow({
                         'run_id': result['run_id'],
+                        'mode': result.get('mode', self.mode),
                         'simulation_time': result['simulation_time'],
                         'step_count': result['step_count'],
                         'goal_reached': summary['goal_reached'],
@@ -298,7 +456,43 @@ class MonteCarloRunner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run Monte Carlo simulations for Predictive DWA')
+    parser = argparse.ArgumentParser(
+        description='Run Monte Carlo simulations for Predictive DWA',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modes:
+  default  - Uses standard simulation with navigator configured in robot.py
+  learned  - Uses trained PPO model to control heading offset
+
+Examples:
+  # Run with default navigator
+  python monte_carlo.py --runs 10 --mode default
+
+  # Run with learned model (default checkpoint)
+  python monte_carlo.py --runs 10 --mode learned
+
+  # Run with learned model (custom checkpoint)
+  python monte_carlo.py --runs 10 --mode learned --model path/to/model.pt
+
+  # Run with learned model and custom action interval
+  python monte_carlo.py --runs 10 --mode learned --action-select-interval 5
+
+  # Run with visualization enabled (slower)
+  python monte_carlo.py --runs 5 --mode learned --render
+        """
+    )
+    
+    # Mode selection
+    parser.add_argument('--mode', type=str, choices=['default', 'learned'], default='default',
+                        help='Simulation mode: "default" or "learned" (default: default)')
+    
+    # Learned mode arguments
+    parser.add_argument('--model', type=str, default=None,
+                        help='Path to trained model (for learned mode, default: checkpoints/theta_qnet.pt)')
+    parser.add_argument('--action-select-interval', type=int, default=1,
+                        help='Select a new action every N steps in learned mode (default: 1)')
+    
+    # Simulation parameters
     parser.add_argument('--runs', type=int, default=10, help='Number of simulation runs (default: 10)')
     parser.add_argument('--corridor-width', type=float, default=4.0, help='Corridor width in meters (default: 4.0)')
     parser.add_argument('--door-side', choices=['left', 'right'], default='right', help='Door side (default: right)')
@@ -306,6 +500,7 @@ def main():
     parser.add_argument('--people-speed-min', type=float, default=0.6, help='Minimum people speed (default: 0.6)')
     parser.add_argument('--people-speed-max', type=float, default=1.2, help='Maximum people speed (default: 1.2)')
     parser.add_argument('--max-time', type=float, default=60.0, help='Maximum simulation time per run (default: 60.0)')
+    parser.add_argument('--render', action='store_true', help='Enable visualization (slower)')
     parser.add_argument('--export-summary', action='store_true', help='Export summary statistics to CSV')
     
     args = parser.parse_args()
@@ -317,7 +512,11 @@ def main():
         door_side=args.door_side,
         num_people=args.num_people,
         people_speed_range=(args.people_speed_min, args.people_speed_max),
-        max_simulation_time=args.max_time
+        max_simulation_time=args.max_time,
+        mode=args.mode,
+        model_path=args.model,
+        action_select_interval=args.action_select_interval,
+        render=args.render
     )
     
     runner.run_monte_carlo()
