@@ -59,7 +59,7 @@ class TSDWA:
         theta_range: float = math.pi/3,  # θ_range   (±30° cone)
         alpha_ph: float = 2.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
-        sampling_strategy: str = "beta",  # Strategy: "uniform", "power", "gaussian", "beta"
+        sampling_strategy: str = "uniform",  # Strategy: "uniform", "power", "gaussian", "beta"
         left_weight: float = 2,       # Sampling density weight for left side
         right_weight: float = 10,      # Sampling density weight for right side
         verbose: bool = False,          # Enable debug printing
