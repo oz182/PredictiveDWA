@@ -4,6 +4,8 @@ import math
 import argparse
 import random
 import time
+import csv
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -13,6 +15,67 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
 from agents.ppo import PPO
 from learning.train import extract_nav_features
+
+
+def save_episode_csv(sim, episode_id: int, offset_history: list):
+    """
+    Save episode data to CSV with fields matching monte_carlo.py format.
+    Saves to current directory.
+    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"test_learned_ep{episode_id:03d}_{timestamp}.csv"
+    
+    if not sim.simulation_data:
+        print("No simulation data to export")
+        return None
+    
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            # Fields matching sim.simulation_data + agent_offset
+            fieldnames = [
+                'timestamp', 'elapsed_time', 
+                'robot_x', 'robot_y',
+                'robot_velocity_x', 'robot_velocity_y', 'robot_velocity_magnitude',
+                'total_distance_traveled', 'goal_reached', 'num_people',
+                'collision_count', 'in_person_overlap', 'in_door_overlap',
+                'clearance_to_door', 'dt', 'agent_offset'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for i, point in enumerate(sim.simulation_data):
+                row = {
+                    'timestamp': point['timestamp'],
+                    'elapsed_time': point['elapsed_time'],
+                    'robot_x': point['robot_x'],
+                    'robot_y': point['robot_y'],
+                    'robot_velocity_x': point['robot_velocity_x'],
+                    'robot_velocity_y': point['robot_velocity_y'],
+                    'robot_velocity_magnitude': point['robot_velocity_magnitude'],
+                    'total_distance_traveled': point['total_distance_traveled'],
+                    'goal_reached': point['goal_reached'],
+                    'num_people': point['num_people'],
+                    'collision_count': point['collision_count'],
+                    'in_person_overlap': point['in_person_overlap'],
+                    'in_door_overlap': point['in_door_overlap'],
+                    'clearance_to_door': point['clearance_to_door'],
+                    'dt': point['dt'],
+                    'agent_offset': offset_history[i] if i < len(offset_history) else 0.0
+                }
+                writer.writerow(row)
+        
+        # Print summary
+        summary = sim.get_simulation_summary()
+        print(f"  CSV saved: {filename}")
+        if summary:
+            print(f"  Summary: time={summary['total_simulation_time']:.2f}s, "
+                  f"dist={summary['total_distance_traveled']:.2f}m, "
+                  f"collisions={summary['total_collisions']}, "
+                  f"overlap_door={summary.get('overlap_time_door', 0):.3f}s")
+        return filename
+    except Exception as e:
+        print(f"Error saving CSV: {e}")
+        return None
 
 
 def load_model(model_path, device='cpu'):
@@ -61,10 +124,33 @@ def plot_and_print_offsets(offset_vals):
         print(f"  step {i+1}: offset={offset:6.3f} rad ({offset_deg:6.1f}°)")
 
 
-def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action_select_interval=1):
-    random.seed(int(time.time()))
-    np.random.seed(int(time.time()))
-    torch.manual_seed(int(time.time()))
+def set_seed(episode_id: int, base_seed: int = None) -> int:
+    """Set random seeds for reproducibility.
+    
+    Args:
+        episode_id: Current episode ID (0-indexed). Combined with base_seed for unique per-episode seed.
+        base_seed: Base seed value. If None, uses time-based seed (non-reproducible).
+    
+    Returns:
+        The seed that was used.
+    """
+    if base_seed is not None:
+        seed = base_seed + episode_id
+    else:
+        seed = int(time.time()) + episode_id
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    return seed
+
+
+def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action_select_interval=1, save_csv=False, seed=None):
+    # Set initial seed for model loading
+    initial_seed = set_seed(0, seed)
+    
+    print(f"Base seed: {seed if seed is not None else 'time-based (non-reproducible)'}")
 
     agent = load_model(model_path)
 
@@ -80,6 +166,10 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
         clock = None
 
     for ep in range(episodes):
+        # Set seed for this episode (for reproducibility)
+        episode_seed = set_seed(ep, seed)
+        print(f"\nStarting episode {ep+1}/{episodes} (seed={episode_seed})")
+        
         sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
                          people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)])
         # Warm-up step to init internal state
@@ -134,6 +224,11 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
         print(f"Episode {ep+1}/{episodes} finished in {t+1} steps")
         # Clear rollout buffer accumulated during select_action calls (no updates during eval)
         agent.buffer.clear()
+        
+        # Save CSV if enabled
+        if save_csv:
+            save_episode_csv(sim, ep + 1, offset_history)
+        
         # plot_and_print_offsets(offset_history)
 
     if render:
@@ -147,7 +242,9 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='checkpoints/theta_qnet.pt', help='Path to trained model')
     parser.add_argument('--episodes', type=int, default=3, help='Number of evaluation episodes')
     parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
+    parser.add_argument('--save-csv', action='store_true', help='Save episode data to CSV')
+    parser.add_argument('--seed', type=int, default=None, help='Base random seed for reproducibility. Episode i uses seed+i. (default: time-based)')
     args = parser.parse_args()
-    main(render=args.render, model_path=args.model, episodes=args.episodes, action_select_interval=args.action_select_interval)
+    main(render=args.render, model_path=args.model, episodes=args.episodes, action_select_interval=args.action_select_interval, save_csv=args.save_csv, seed=args.seed)
 
 
