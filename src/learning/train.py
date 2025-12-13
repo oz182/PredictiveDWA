@@ -66,7 +66,7 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
         return {
             'door_halo_radius_range': (0.8, 2.5),  # Full range
             'door_position_x_range': (5.0, 13.0),  # Wide variation
-            'randomize_door_side': True,           # Randomize left/right
+            'randomize_door_side': False,           # Randomize left/right
             'stage': 'hard'
         }
     
@@ -75,7 +75,7 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
         return {
             'door_halo_radius_range': (0.8, 2.5),  # Full range
             'door_position_x_range': (5.0, 13.0),  # Full range (25%-65% of corridor)
-            'randomize_door_side': True,           # Fully randomized
+            'randomize_door_side': False,           # Fully randomized
             'stage': 'expert'
         }
 
