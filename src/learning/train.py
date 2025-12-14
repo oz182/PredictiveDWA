@@ -43,8 +43,8 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
     # Calculate progress (0.0 to 1.0)
     progress = episode / max(total_episodes, 1)
     
-    # Stage 1: Easy (first 20% of training)
-    if progress < 0.2:
+    # Stage 1: Easy (first 40% of training)
+    if progress < 0.4:
         return {
             'door_halo_radius_range': (1.6, 2.0),  # Narrow range around known value
             'door_position_x_range': (7.0, 9.0),   # Fixed around 40% of 20m corridor
@@ -52,8 +52,8 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
             'stage': 'easy'
         }
     
-    # Stage 2: Medium (20% - 50% of training)
-    elif progress < 0.5:
+    # Stage 2: Medium (40% - 60% of training)
+    elif progress < 0.6:
         return {
             'door_halo_radius_range': (1.2, 2.3),  # Expanded range
             'door_position_x_range': (6.0, 11.0),  # More variation in position
@@ -61,7 +61,7 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
             'stage': 'medium'
         }
     
-    # Stage 3: Hard (50% - 80% of training)
+    # Stage 3: Hard (60% - 80% of training)
     elif progress < 0.8:
         return {
             'door_halo_radius_range': (0.8, 2.5),  # Full range
@@ -433,7 +433,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     # 1. PROGRESS REWARD - Encourage moving toward goal
     # ==========================================================================
     progress = progress_prev_dist - dist  # Positive if moving toward goal
-    progress_reward = progress * 0.5  # Scale factor for progress
+    progress_reward = progress * 10.0  # Scale factor for progress
     reward += progress_reward
     
     # ==========================================================================
@@ -443,17 +443,17 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     overlap_type = overlap_info['overlap_type']
     
     if overlap_type == 'none':
-        # POSITIVE reward for staying in free space
-        overlap_reward = 1.0
+        # Negative reward for staying in free space
+        overlap_reward = -0.01
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        overlap_reward = -1.0
+        overlap_reward = -1.5
     elif overlap_type == 'door':
         # Penalty for being in door's inflation zone
-        overlap_reward = -1.0
+        overlap_reward = -2.0
     elif overlap_type == 'both':
         # Larger penalty for being in both zones
-        overlap_reward = -2.0
+        overlap_reward = -3.0
     else:
         overlap_reward = 0.0
     
@@ -466,7 +466,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     
     # Shaping zone: give continuous reward based on proximity to obstacles
     # This helps the agent learn to keep distance BEFORE entering overlap zone
-    shaping_threshold = 2.0  # Start shaping within 2m of obstacles
+    shaping_threshold = float('inf') #2.0  # Start shaping within 2m of obstacles
     
     shaping_reward = 0.0
     if min_person_dist < shaping_threshold and min_person_dist > 0:
@@ -486,13 +486,13 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     new_collisions = current_collision_count - prev_collision_count
     
     if new_collisions > 0:
-        reward += -5.0 * new_collisions  # Large penalty per collision
+        reward += -8.0 * new_collisions  # Large penalty per collision
     
     # ==========================================================================
     # 5. GOAL REACHED BONUS
     # ==========================================================================
     if dist < 1.0:  # Goal reached
-        reward += 10.0  # Large positive reward for completing the task
+        reward += 15.0  # Large positive reward for completing the task
     
     # Build info dict
     info = {
