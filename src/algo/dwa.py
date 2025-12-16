@@ -38,8 +38,10 @@ class DWA:
         self.w_samples = 12  # Number of angular velocity samples
         self.v_min = 0.0  # Minimum linear velocity
         self.v_max = max_speed  # Maximum linear velocity
-        self.w_min = -math.pi / 2  # Minimum angular velocity
-        self.w_max = math.pi / 2  # Maximum angular velocity
+        #self.w_min = -math.pi / 2  # Minimum angular velocity
+        self.w_min = -math.pi  # Minimum angular velocity
+        #self.w_max = math.pi / 2  # Maximum angular velocity
+        self.w_max = math.pi  # Maximum angular velocity
         
         # Door-aware sampling parameters
         self.door_position = None  # Will be set when door position is known
@@ -150,7 +152,8 @@ class DWA:
         
         # Get door-aware sampling parameters
         #w_min, w_max = self.get_door_aware_sampling_params()
-        w_min, w_max = -math.pi / 2, math.pi / 2  # Capped to prevent extreme turning
+        #w_min, w_max = -math.pi / 2, math.pi / 2  # Capped to prevent extreme turning
+        w_min, w_max = -math.pi, math.pi
         
         # Sample velocities and evaluate
         best_score = -float('inf')
