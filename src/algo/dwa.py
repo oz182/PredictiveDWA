@@ -24,22 +24,22 @@ class DWA:
             self.orientation = 0.0  # Angle in radians (0 points to right)
         
         # DWA parameters
-        self.max_rotation = math.pi  # Max angular velocity (rad/s)
+        self.max_rotation = math.pi / 2  # Max angular velocity (rad/s) - capped to prevent dynamic window trapping
         self.max_accel = 1.0 * 4  # Max linear acceleration (m/s²)
         self.max_angular_accel = math.pi * 2  # Max angular acceleration (rad/s²)
         self.dt = 0.167  # Time step for simulation
-        self.predict_time = 2.0  # How far ahead to predict (seconds)
+        self.predict_time = 12.0 * self.dt  # How far ahead to predict (seconds)
         self.goal = None
         self.trajectories = []  # For visualization
         self.best_trajectory = None  # For visualization
         
         # Sample space parameters
         self.v_samples = 8  # Number of linear velocity samples
-        self.w_samples = 8  # Number of angular velocity samples
+        self.w_samples = 12  # Number of angular velocity samples
         self.v_min = 0.0  # Minimum linear velocity
         self.v_max = max_speed  # Maximum linear velocity
-        self.w_min = -math.pi  # Minimum angular velocity
-        self.w_max = math.pi  # Maximum angular velocity
+        self.w_min = -math.pi / 2  # Minimum angular velocity
+        self.w_max = math.pi / 2  # Maximum angular velocity
         
         # Door-aware sampling parameters
         self.door_position = None  # Will be set when door position is known
@@ -47,11 +47,12 @@ class DWA:
         self.door_influence_radius = 7.5  # Distance in meters where door affects sampling
         self.door_sampling_bias = 0.8  # How strongly to bias sampling (0-1)
         
-        # Scoring weights
+        # Scoring weights (classic DWA)
         self.weights = {
-            'goal': 0.6,      # Higher weight on reaching goal (like FORWARDWEIGHT in reference)
-            'clearance': 0.3, # Moderate weight on clearance 
-            'velocity': 0.1,  # Lower weight on velocity
+            'heading': 0.3,   # Alignment toward goal
+            'goal': 0.1,      # Progress toward goal (distance reduction)
+            'clearance': 0.5, # Obstacle avoidance
+            'velocity': 0.4,  # Forward motion
         }
         
         # Robot dynamics
@@ -148,8 +149,8 @@ class DWA:
         dw = self.dynamic_window()
         
         # Get door-aware sampling parameters
-        w_min, w_max = self.get_door_aware_sampling_params()
-        #w_min, w_max = -math.pi, math.pi
+        #w_min, w_max = self.get_door_aware_sampling_params()
+        w_min, w_max = -math.pi / 2, math.pi / 2  # Capped to prevent extreme turning
         
         # Sample velocities and evaluate
         best_score = -float('inf')
@@ -167,14 +168,16 @@ class DWA:
                 self.trajectories.append(trajectory)  # For visualization
                 
                 # Calculate scores
+                heading_score = self.heading_score(trajectory, v, w)
                 goal_score = self.goal_score(trajectory)
                 clearance_score = self.clearance_score(trajectory, people)
                 
-                # Velocity score: prefer higher speeds but don't penalize too much for lower speeds
-                velocity_score = v / self.max_speed if v > 0 else 0
+                # Velocity score: prefer higher speeds, penalize near-zero velocity
+                velocity_score = v / self.max_speed if v > 0.1 else -1.0
                 
                 # Total weighted score
-                total_score = (self.weights['goal'] * goal_score +
+                total_score = (self.weights['heading'] * heading_score +
+                              self.weights['goal'] * goal_score +
                               self.weights['clearance'] * clearance_score +
                               self.weights['velocity'] * velocity_score)
                 
@@ -242,19 +245,46 @@ class DWA:
         return np.array(trajectory)
     
     def goal_score(self, trajectory):
-        # Score based on distance to goal
+        """Score based on progress toward goal (distance reduction over the horizon)."""
         final_pos = trajectory[-1]
         distance_to_goal = np.linalg.norm(self.goal - final_pos)
-        
-        # Calculate progress towards goal (like reference implementation)
+
         previous_distance = np.linalg.norm(self.goal - self.position)
         progress = previous_distance - distance_to_goal
-        
-        # Normalize progress (positive for moving towards goal)
+
         if previous_distance == 0:
             return 1.0
-             
-        return progress / previous_distance  # Normalized progress score
+
+        return progress / previous_distance
+
+    def heading_score(self, trajectory, v, w):
+        """Score based on how well the trajectory heads toward the goal.
+        
+        Classic DWA uses the angle between current heading and goal direction.
+        We also penalize excessive rotation to prevent wrap-around exploits.
+        """
+        if v < 0.01:  # Penalize near-zero velocity heavily
+            return -1.0
+        
+        # Goal direction from current position
+        goal_direction = self.goal - self.position
+        desired_theta = math.atan2(goal_direction[1], goal_direction[0])
+        
+        # Heading after ONE time step (not full predict_time to avoid wrap-around)
+        next_theta = self.orientation + w * self.dt
+        next_theta = self.normalize_angle(next_theta)
+        
+        # Angular difference between next heading and goal direction
+        angle_diff = abs(self.normalize_angle(desired_theta - next_theta))
+        
+        # Base score: 1.0 when aligned, 0.0 when perpendicular, negative when opposite
+        base_score = 1.0 - (angle_diff / math.pi)
+        
+        # Penalize high angular velocities to prevent spinning (diminishing returns)
+        # Trajectories with |w| > pi/2 get progressively penalized
+        rotation_penalty = max(0.0, (abs(w) - math.pi/2) / (math.pi/2))  # 0 to 1 for w from pi/2 to pi
+        
+        return base_score - 0.3 * rotation_penalty
     
     def clearance_score_v0(self, trajectory, people):
         if not people:
