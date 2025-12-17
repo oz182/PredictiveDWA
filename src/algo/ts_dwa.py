@@ -784,7 +784,8 @@ class TSDWA:
         # Penalize high angular velocities to prevent spinning (diminishing returns)
         # Trajectories with |w| > pi/2 get progressively penalized
         #rotation_penalty = max(0.0, (abs(w) - math.pi/2) / (math.pi/2))  # 0 to 1 for w from pi/2 to pi
-        rotation_penalty = max(0.0, (abs(w) - math.pi) / (math.pi))  # 0 to 1 for w from pi to 2pi
+        #rotation_penalty = max(0.0, (abs(w) - math.pi) / (math.pi))  # 0 to 1 for w from pi to 2pi
+        rotation_penalty = 0.0
         return base_score - 0.3 * rotation_penalty
 
     def _clearance_score(self, traj, people):
