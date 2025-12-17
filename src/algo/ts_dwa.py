@@ -57,7 +57,7 @@ class TSDWA:
         n_heading: int = 9,             # n_asamp   (angular samples in polar space)
         n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
         theta_range: float = math.pi/3,  # θ_range   (±30° cone)
-        alpha_ph: float = 2.0,          # α_ph heading‑bias gain
+        alpha_ph: float = 1.0,          # α_ph heading‑bias gain
         n_skip: int = 4,                # spacing between curvature calculation points
         sampling_strategy: str = "uniform",  # Strategy: "uniform", "power", "gaussian", "beta"
         left_weight: float = 2,       # Sampling density weight for left side
@@ -105,7 +105,7 @@ class TSDWA:
         self.w = 0.0
 
         # Re‑use original scoring weights for now; user may tune externally
-        self.weights = {"goal": 0.1, "clearance": 0.8, "velocity": 0.1}
+        self.weights = {"heading": 0.3, "goal": 0.1, "clearance": 0.4, "velocity": 0.2}
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
@@ -165,12 +165,14 @@ class TSDWA:
             traj = self._predict_trajectory(v_sample, w_sample)
             self.trajectories.append(traj)
 
+            h = self._heading_score(v_sample, w_sample)
             g = self._goal_score(traj)
             c = self._clearance_score(traj, people)
-            vel_score = v_sample / self.max_speed
+            vel_score = v_sample / self.max_speed if v_sample > 0.1 else -1.0
 
             score = (
-                self.weights["goal"] * g
+                self.weights["heading"] * h
+                + self.weights["goal"] * g
                 + self.weights["clearance"] * c
                 + self.weights["velocity"] * vel_score
             )
@@ -686,15 +688,11 @@ class TSDWA:
         v_min, v_max, w_min, w_max = dw
 
         # Translational sampling in polar space ---------------------------
-        # Use weighted sampling strategy for heading angles
-        headings = self._generate_weighted_headings(
-            theta_ph, self.theta_range, self.n_heading
+        headings = np.linspace(
+            theta_ph - self.theta_range,
+            theta_ph + self.theta_range,
+            self.n_heading,
         )
-        
-        # Debug: Print heading distribution
-        if self.verbose:
-            print(f"  Headings (relative to θ_ph): min={min(headings - theta_ph):6.3f}, "
-                  f"max={max(headings - theta_ph):6.3f}, mean={np.mean(headings - theta_ph):6.3f}")
         
         speeds = np.linspace(self.max_speed * 0.1, self.max_speed, self.n_speed)
 
@@ -759,6 +757,36 @@ class TSDWA:
         direction_traj = (final - self.position) / max(np.linalg.norm(final - self.position), 1e-6)
         alignment = np.dot(direction_goal, direction_traj)
         return 0.7 * (1 - dist_goal / dist_max) + 0.3 * alignment
+
+    def _heading_score(self, v: float, w: float) -> float:
+        """Score based on how well the trajectory heads toward the goal.
+        
+        Classic DWA uses the angle between current heading and goal direction.
+        We also penalize excessive rotation to prevent wrap-around exploits.
+        """
+        if v < 0.01:  # Penalize near-zero velocity heavily
+            return -1.0
+        
+        # Goal direction from current position
+        goal_direction = self.goal - self.position
+        desired_theta = math.atan2(goal_direction[1], goal_direction[0])
+        
+        # Heading after ONE time step (not full predict_time to avoid wrap-around)
+        next_theta = self.orientation + w * self.dt
+        next_theta = self._normalize_angle(next_theta)
+        
+        # Angular difference between next heading and goal direction
+        angle_diff = abs(self._normalize_angle(desired_theta - next_theta))
+        
+        # Base score: 1.0 when aligned, 0.0 when perpendicular, negative when opposite
+        base_score = 1.0 - (angle_diff / math.pi)
+        
+        # Penalize high angular velocities to prevent spinning (diminishing returns)
+        # Trajectories with |w| > pi/2 get progressively penalized
+        #rotation_penalty = max(0.0, (abs(w) - math.pi/2) / (math.pi/2))  # 0 to 1 for w from pi/2 to pi
+        #rotation_penalty = max(0.0, (abs(w) - math.pi) / (math.pi))  # 0 to 1 for w from pi to 2pi
+        rotation_penalty = 0.0
+        return base_score - 0.3 * rotation_penalty
 
     def _clearance_score(self, traj, people):
 
