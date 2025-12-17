@@ -688,15 +688,11 @@ class TSDWA:
         v_min, v_max, w_min, w_max = dw
 
         # Translational sampling in polar space ---------------------------
-        # Use weighted sampling strategy for heading angles
-        headings = self._generate_weighted_headings(
-            theta_ph, self.theta_range, self.n_heading
+        headings = np.linspace(
+            theta_ph - self.theta_range,
+            theta_ph + self.theta_range,
+            self.n_heading,
         )
-        
-        # Debug: Print heading distribution
-        if self.verbose:
-            print(f"  Headings (relative to θ_ph): min={min(headings - theta_ph):6.3f}, "
-                  f"max={max(headings - theta_ph):6.3f}, mean={np.mean(headings - theta_ph):6.3f}")
         
         speeds = np.linspace(self.max_speed * 0.1, self.max_speed, self.n_speed)
 
