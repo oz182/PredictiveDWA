@@ -12,16 +12,31 @@ from sim.robot import Robot
 
 
 class Simulation:
-    def __init__(self, corridor_width: float = 5.0, door_side: str = "right", 
-                 num_people: int = 5, people_speeds: List[float] = None):
+    def __init__(
+        self,
+        corridor_width: float = 4.0,
+        door_side: str = "right",
+        corridor_length: float = 20.0,
+        num_people: int = 5,
+        people_speeds: List[float] = None,
+        spawn_interval: float = 0.5,
+        spawn_timer: float = 0.5,
+        # Spawning process:
+        # - "uniform": headway ~ Uniform(spawn_interval_range[0], spawn_interval_range[1])  (default; matches old behavior)
+        # - "poisson": headway = spawn_min_gap + Exp(spawn_rate_hz)  (shifted exponential / Poisson arrivals)
+        spawn_process: str = "poisson",
+        spawn_interval_range: Tuple[float, float] = (0.5, 2.0),
+        spawn_min_gap: float = 0.3,
+        spawn_rate_hz: float = 0.588,
+    ):
         self.corridor_width = corridor_width
         self.door_side = door_side
         self.num_people = num_people
         self.people_speeds = people_speeds if people_speeds else [random.uniform(0.6, 1.2) for _ in range(num_people)]
         
         # Corridor dimensions
-        self.corridor_length = 20.0
-        self.door_position = 0.4 * self.corridor_length  # Door is 40% along corridor
+        self.corridor_length = corridor_length
+        self.door_position = 0.5 * self.corridor_length  # Door is 40% along corridor
         self.corridor_bounds = {
             'x_min': 0,
             'x_max': self.corridor_length,
@@ -38,8 +53,16 @@ class Simulation:
             self.robot.nav.set_door_info(self.get_door_position(), self.door_side)
         
         self.people: List[Person] = []
-        self.spawn_timer = 1.0
-        self.spawn_interval = 1.0  # Spawn a person every second
+        self.spawn_process = str(spawn_process).lower().strip()
+        self.spawn_interval_range = spawn_interval_range
+        self.spawn_min_gap = float(spawn_min_gap)
+        self.spawn_rate_hz = float(spawn_rate_hz)
+
+        self.spawn_timer = float(spawn_timer)
+        # Keep backwards-compat: allow passing a fixed spawn_interval when using uniform.
+        self.spawn_interval = float(spawn_interval)
+        # If using the default "uniform" process, we sample the next interval just like before.
+        self.spawn_interval = self._sample_next_spawn_interval(fallback=float(spawn_interval))
         
         # For visualization
         self.scale = 40  # pixels per meter
@@ -95,19 +118,50 @@ class Simulation:
         speed = self.people_speeds[len(self.people)]
         person = Person((door_x, door_y), 0.3, speed, self.door_side, self.corridor_width, self.corridor_length)
         self.people.append(person)
+
+    def _sample_next_spawn_interval(self, fallback: float = 0.5) -> float:
+        """
+        Sample the next spawn headway (seconds).
+        - uniform: Uniform(low, high)
+        - poisson: min_gap + Exp(rate)
+        """
+        proc = str(self.spawn_process).lower().strip()
+
+        if proc == "poisson":
+            rate = float(self.spawn_rate_hz)
+            min_gap = max(0.0, float(self.spawn_min_gap))
+            if rate <= 0.0 or (not math.isfinite(rate)):
+                return max(0.0, float(fallback))
+            # Exp(rate) in seconds (random.expovariate expects lambda=rate)
+            return float(min_gap + random.expovariate(rate))
+
+        # Default: uniform (matches previous behavior of resampling between 0.5 and 2.0 after each spawn)
+        try:
+            lo, hi = float(self.spawn_interval_range[0]), float(self.spawn_interval_range[1])
+        except Exception:
+            lo, hi = 0.5, 2.0
+        if not math.isfinite(lo):
+            lo = 0.5
+        if not math.isfinite(hi):
+            hi = 2.0
+        if hi < lo:
+            lo, hi = hi, lo
+        lo = max(0.0, lo)
+        hi = max(lo, hi)
+        return float(random.uniform(lo, hi))
     
     def step(self, dt: float):
         # Initialize start time on first step
         if self.start_time is None:
             self.start_time = datetime.now()
             self.previous_position = self.robot.position.copy()
-        
+                
         # Spawn people
         self.spawn_timer += dt
         if self.spawn_timer >= self.spawn_interval and len(self.people) < self.num_people:
             self.spawn_person()
             self.spawn_timer = 0
-            self.spawn_interval = random.uniform(0.5, 2.0)
+            self.spawn_interval = self._sample_next_spawn_interval(fallback=self.spawn_interval)
             
         # Update agents
         state, reward, done = self.robot.update(dt, self.people)
@@ -190,21 +244,25 @@ class Simulation:
 
         # Optional: display state_input feature vector for debugging.
         # Assumes layout from learning.extract_nav_features:
-        # [goal_dx, goal_dy, door_dx, door_dy,
+        # [num_people,
+        #  heading,
+        #  goal_dx, goal_dy, door_dx, door_dy,
         #  p1_dx, p1_dy, p2_dx, p2_dy, p3_dx, p3_dy,
         #  dist_left, dist_right]
         if state_input is not None:
             feat = np.asarray(state_input, dtype=float).tolist()
-            if len(feat) >= 12:
-                gdx, gdy = feat[0], feat[1]
-                door_dx, door_dy = feat[2], feat[3]
-                p1_dx, p1_dy = feat[4], feat[5]
-                p2_dx, p2_dy = feat[6], feat[7]
-                p3_dx, p3_dy = feat[8], feat[9]
-                dist_left = feat[10]
-                dist_right = feat[11]
+            if len(feat) >= 13:
+                heading = feat[0]
+                gdx, gdy = feat[1], feat[2]
+                door_dx, door_dy = feat[3], feat[4]
+                p1_dx, p1_dy = feat[5], feat[6]
+                p2_dx, p2_dy = feat[7], feat[8]
+                p3_dx, p3_dy = feat[9], feat[10]
+                dist_left = feat[11]
+                dist_right = feat[12]
 
                 info_text.extend([
+                    f"heading:    {heading:5.2f} rad ({heading * 180 / math.pi:5.1f}°)",
                     f"goal_rel:   ({gdx:5.2f}, {gdy:5.2f})",
                     f"door_rel:   ({door_dx:5.2f}, {door_dy:5.2f})",
                     f"p1_rel:     ({p1_dx:5.2f}, {p1_dy:5.2f})",

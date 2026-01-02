@@ -241,7 +241,7 @@ class EmbeddedSimulationGUI:
         
         # Parameter variables
         self.sim_params = {
-            'corridor_width': tk.DoubleVar(value=4.0),
+            'corridor_width': tk.DoubleVar(value=2.5),
             'num_people': tk.IntVar(value=3),
             'spawn_interval': tk.DoubleVar(value=1.0),
             'door_side': tk.StringVar(value="right")
@@ -368,7 +368,7 @@ class EmbeddedSimulationGUI:
                 door_side = self.sim_params['door_side'].get()
                 num_people = self.sim_params['num_people'].get()
             else:
-                corridor_width = 4.0
+                corridor_width = 2.5
                 door_side = "right"
                 num_people = 3
             
@@ -378,7 +378,7 @@ class EmbeddedSimulationGUI:
             self.simulation = Simulation(
                 corridor_width=corridor_width,
                 door_side=door_side,
-                num_people=num_people,
+                num_people=num_people - 1, 
                 people_speeds=people_speeds
             )
             self.apply_dwa_parameters()  # Apply initial DWA parameters

@@ -5,7 +5,7 @@ import random
 from collections import deque
 import argparse
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -15,70 +15,11 @@ import torch.nn as nn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
 from agents.ppo import PPO
-from agents.ppo_lstm import PPO_LSTM
-from agents.td3 import TD3, ReplayBuffer as TD3ReplayBuffer
-from agents.td3_lstm import TD3_LSTM
 
 # Optional third-party integrations
 
 import wandb  
 import optuna  
-
-def _overwrite_last_ppo_action(agent: PPO, state_feat: np.ndarray, executed_action_value: float) -> None:
-    """Make PPO's rollout buffer consistent with the action we *actually executed*.
-
-    `PPO.select_action()` samples an action and immediately stores (state, action, logprob, value)
-    into the buffer. If we later clamp/transform that action before applying it to the environment,
-    PPO will learn from the wrong action -> training becomes unstable and often gets worse.
-
-    This helper recomputes logprob/value under `policy_old` for the executed action and overwrites
-    the last buffer entries so PPO updates match the environment interaction.
-    """
-    # buffer must already have the state appended by select_action()
-    if not agent.buffer.states:
-        return
-
-    policy_device = next(agent.policy_old.parameters()).device
-    state_tensor_no_batch = torch.as_tensor(state_feat, dtype=torch.float32, device=policy_device)
-    state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
-    action_tensor_batch = torch.tensor([[float(executed_action_value)]], dtype=torch.float32, device=policy_device)
-
-    with torch.no_grad():
-        logprob, state_value, _ = agent.policy_old.evaluate(state_tensor_batch, action_tensor_batch)
-
-    # Overwrite the last stored transition
-    agent.buffer.states[-1] = state_tensor_no_batch.detach()
-    agent.buffer.actions[-1] = action_tensor_batch.squeeze(0).detach()
-    agent.buffer.logprobs[-1] = logprob.detach()
-    agent.buffer.state_values[-1] = state_value.squeeze(0).detach()
-
-def configure_nav(sim: Simulation, algo: str) -> None:
-    """Configure the robot's local planner to match the requested algorithm."""
-    algo = str(algo).lower().strip()
-
-    # Use Robot's helper so TS-DWA gets the correct update() signature (global_path).
-    if hasattr(sim.robot, "set_nav_type"):
-        sim.robot.set_nav_type(algo)
-    else:
-        sim.robot.nav_type = algo
-
-    # Ensure the new planner gets a valid goal after swapping planners.
-    if getattr(sim.robot, "goal", None) is not None and hasattr(sim.robot, "set_goal"):
-        sim.robot.set_goal(tuple(sim.robot.goal))
-    elif getattr(sim.robot, "goal", None) is not None and hasattr(sim.robot, "nav") and hasattr(sim.robot.nav, "set_goal"):
-        sim.robot.nav.set_goal(tuple(sim.robot.goal))
-
-    # Provide door info to DWA variants (used for door-aware sampling angle/distance).
-    if hasattr(sim.robot, "nav") and hasattr(sim.robot.nav, "set_door_info") and hasattr(sim, "get_door_position"):
-        try:
-            sim.robot.nav.set_door_info(sim.get_door_position(), getattr(sim, "door_side", None))
-        except Exception:
-            pass
-
-    # Explicitly toggle door-aware sampling for these two modes.
-    if hasattr(sim.robot, "nav") and hasattr(sim.robot.nav, "door_aware_sampling"):
-        sim.robot.nav.door_aware_sampling = (algo == "dwa_door_aware")
-
 
 def extract_nav_features(sim) -> np.ndarray:
     """
@@ -230,7 +171,6 @@ def extract_nav_features_v0(sim) -> np.ndarray:
     """
     nav = sim.robot.get_navigation_info(2)
 
-    
     robot_pos = np.asarray(sim.robot.position, dtype=float)
     robot_orientation = float(getattr(sim.robot, 'orientation', 0.0))
     goal_pos = np.asarray(sim.robot.goal, dtype=float)
@@ -415,7 +355,7 @@ def check_robot_overlap(sim) -> dict:
     }
 
 
-def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, door_dy: float | None = None) -> tuple[float, float, dict]:
+def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, door_dy: Optional[float] = None) -> Tuple[float, float, dict]:
     """
     Reward focused on obstacle avoidance with better credit assignment.
     
@@ -430,28 +370,23 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, door_dy:
     goal_pos = sim.robot.goal
     dist = float(np.linalg.norm(goal_pos - robot_pos))
 
-    # Start with progress-based shaping so the policy gets a dense signal.
-    # (Positive when moving toward the goal.)
-    progress = float(progress_prev_dist) - float(dist)
-    reward = 10.0 * progress
+    reward = 0.0
     # Check overlap with inflation zones
     overlap_info = check_robot_overlap(sim)
     
     # PRIMARY SIGNAL: Obstacle-based rewards
     overlap_type = overlap_info['overlap_type']
     if overlap_type == 'none':
-        # Small time penalty to encourage finishing sooner (but don't swamp progress).
-        reward += -0.1
+        # Positive reward for staying in free space
+        reward = -0.1
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        reward += -1.0
-    elif overlap_type == 'door':
-        reward += 0
+        reward = -1.0  # Increased penalty to make signal stronger
     elif overlap_type == 'both':
         # Higher penalty for being in both zones
-        reward += -1.0
+        reward = -1.0  # Increased penalty
     else:
-        reward += -0.1
+        reward = -0.1
 
     # # Additional door-distance penalty along y using door_dy = door_y - robot_y
     # # We penalize when door_dy is greater than desired_dist_from_door
@@ -475,10 +410,6 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, door_dy:
         'offset_abs': abs(offset),
         'door_dy': door_dy if door_dy is not None else float('nan'),
     }
-
-    # Terminal bonus for reaching the goal region
-    if dist < 1.0:
-        reward += 5.0
     
     # # If a collision occurred in this step
     # if sim.collision_history:
@@ -489,7 +420,7 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, door_dy:
     return reward, dist, info
 
 
-def compute_reward_v0(sim, progress_prev_dist: float, offset: float = 0.0) -> tuple[float, float, dict]:
+def compute_reward_v0(sim, progress_prev_dist: float, offset: float = 0.0) -> Tuple[float, float, dict]:
     """
     Reward focused on obstacle avoidance with better credit assignment.
     
@@ -561,26 +492,10 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     eps_clip = float(config.get('eps_clip', 0.2))
     update_timestep = int(config.get('update_timestep', 1024))
     action_select_interval = int(config.get('action_select_interval', 1))  # select new action every N steps
-    # If true: treat `action_select_interval` as a real frame-skip/macro-step.
-    # We will apply the same action for N sim steps, accumulate reward over those N steps,
-    # and store exactly ONE (state, action, reward_sum, done) transition into PPO per macro-step.
-    macro_step = bool(config.get("macro_step", False))
     lr_actor = float(config.get('lr_actor', config.get('learning_rate', 1e-3)))
     lr_critic = float(config.get('lr_critic', config.get('learning_rate', 1e-3)))
 
     # Env defaults (also used to infer feature dimension)
-    algo = str(config.get("algo", "ts_dwa")).lower()
-    if algo not in ("ts_dwa", "dwa_door_aware"):
-        raise ValueError(f"Unsupported algo={algo!r}. Expected 'ts_dwa' or 'dwa_door_aware'.")
-
-    # Door-aware PPO controls a planner parameter; keep the range configurable so you can
-    # stay close to a strong fixed baseline (e.g. 0.8).
-    door_bias_min = float(config.get("door_bias_min", 0.6))
-    door_bias_max = float(config.get("door_bias_max", 0.85))
-    door_bias_base = float(config.get("door_bias_base", 0.8))
-    # Only apply PPO's bias modulation when there is at least one person within this distance.
-    bias_people_gate_dist = float(config.get("bias_people_gate_dist", 4.0))
-
     dt = float(config.get('dt', 1/60.0))
     corridor_width = float(config.get('corridor_width', 4.0))
     door_side = str(config.get('door_side', 'right'))
@@ -595,109 +510,34 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         num_people=num_people,
         people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
     )
-    configure_nav(tmp_sim, algo)
     _ = tmp_sim.step(dt)
     input_dim = int(len(extract_nav_features(tmp_sim)))
 
-    # Build agent
+    # Build agent (PPO with discrete action space)
     hidden_size = int(config.get('hidden_size', 128))
-    # If we store only one transition per macro-step (N sim steps), adjust the discount so the
-    # effective horizon is roughly preserved: gamma_macro = gamma ** N.
-    gamma_for_agent = float(gamma)
-    if macro_step and action_select_interval > 1:
-        gamma_for_agent = float(gamma) ** float(action_select_interval)
-    agent_type = str(config.get("agent", "ppo")).lower().strip()
-    if agent_type == "td3" or agent_type == "td3_lstm":
-        # TD3 hyperparams (configurable, but with safe defaults)
-        td3_replay_size = int(config.get("td3_replay_size", 200000))
-        td3_start_steps = int(config.get("td3_start_steps", 2000))
-        td3_update_after = int(config.get("td3_update_after", 2000))
-        td3_update_every = int(config.get("td3_update_every", 50))
-        td3_batch_size = int(config.get("td3_batch_size", 256))
-        td3_policy_delay = int(config.get("td3_policy_delay", 2))
-        td3_polyak = float(config.get("td3_polyak", 0.995))
-        td3_act_noise = float(config.get("td3_act_noise", 0.1))
-        td3_target_noise = float(config.get("td3_target_noise", 0.2))
-        td3_noise_clip = float(config.get("td3_noise_clip", 0.5))
-        td3_max_hist_len = int(config.get("td3_max_hist_len", 10))
-
-        if agent_type == "td3_lstm":
-            agent = TD3_LSTM(
-                obs_dim=input_dim,
-                act_dim=num_actions,
-                act_limit=1.0,
-                gamma=gamma_for_agent,
-                polyak=td3_polyak,
-                pi_lr=lr_actor,
-                q_lr=lr_critic,
-                policy_delay=td3_policy_delay,
-                act_noise=td3_act_noise,
-                target_noise=td3_target_noise,
-                noise_clip=td3_noise_clip,
-                max_hist_len=td3_max_hist_len,
-                hist_with_past_act=True,
-            )
-        else:
-            agent = TD3(
-                obs_dim=input_dim,
-                act_dim=num_actions,
-                act_limit=1.0,
-                gamma=gamma_for_agent,
-                polyak=td3_polyak,
-                pi_lr=lr_actor,
-                q_lr=lr_critic,
-                policy_delay=td3_policy_delay,
-                act_noise=td3_act_noise,
-                target_noise=td3_target_noise,
-                noise_clip=td3_noise_clip,
-                use_history=False,
-            )
-
-        replay = TD3ReplayBuffer(obs_dim=input_dim, act_dim=num_actions, max_size=td3_replay_size)
-    elif agent_type == "ppo_lstm":
-        agent = PPO_LSTM(
-            state_dim=input_dim,
-            action_dim=num_actions,
-            lr_actor=lr_actor,
-            lr_critic=lr_critic,
-            gamma=gamma_for_agent,
-            K_epochs=k_epochs,
-            eps_clip=eps_clip,
-            has_continuous_action_space=True,
-            action_std_init=0.2,
-        )
-    else:
-        agent = PPO(
-            state_dim=input_dim,
-            action_dim=num_actions,
-            lr_actor=lr_actor,
-            lr_critic=lr_critic,
-            gamma=gamma_for_agent,
-            K_epochs=k_epochs,
-            eps_clip=eps_clip,
-            has_continuous_action_space=True,
-            action_std_init=0.2,
-        )
+    agent = PPO(
+        state_dim=input_dim,
+        action_dim=num_actions,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
+        gamma=gamma,
+        K_epochs=k_epochs,
+        eps_clip=eps_clip,
+        has_continuous_action_space=True,
+        action_std_init=0.4,
+    )
 
     if use_wandb and wandb is not None:
         wandb.init(project=str(config.get('wandb_project', 'PredictiveDWA')),
                    name=run_name, config=config, allow_val_change=True)
-        # Watch networks if available
+        # Watch PPO networks if available
         try:
-            if hasattr(agent, "policy") and hasattr(agent.policy, "actor"):
-                wandb.watch(agent.policy.actor, log='all', log_freq=200)
-            if hasattr(agent, "policy") and hasattr(agent.policy, "critic"):
-                wandb.watch(agent.policy.critic, log='all', log_freq=200)
-            if hasattr(agent, "ac") and hasattr(agent.ac, "pi"):
-                wandb.watch(agent.ac.pi, log='all', log_freq=200)
-            if hasattr(agent, "ac") and hasattr(agent.ac, "q1"):
-                wandb.watch(agent.ac.q1, log='all', log_freq=200)
+            wandb.watch(agent.policy.actor, log='all', log_freq=200)
+            wandb.watch(agent.policy.critic, log='all', log_freq=200)
         except Exception:
             pass
 
-    # Update counters:
-    # - PPO: counts rollout transitions in the PPO buffer
-    # - TD3: counts stored transitions in replay buffer
+    # PPO uses its own rollout buffer; updates are triggered by timesteps
     time_step = 0
 
     # Training loop (episodes of the headless simulation)
@@ -709,27 +549,12 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     start_time = time.time()
 
     for ep in range(episodes):
-        num_people = random.randint(2, 4) # Random number of people between 0 and 10
-        # sim = Simulation(
-        #     corridor_width=corridor_width,
-        #     door_side=door_side,
-        #     num_people=num_people,
-        #     people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
-        # )
         sim = Simulation(
-            corridor_width=4.0,
-            corridor_length=20.0,
-            num_people = random.randint(2, 4),
-            people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)],
-            spawn_interval = random.uniform(0.5, 2.0),
+            corridor_width=corridor_width,
+            door_side=door_side,
+            num_people=num_people,
+            people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
         )
-        configure_nav(sim, algo)
-        # Reset recurrent hidden state at episode start (PPO_LSTM only)
-        if hasattr(agent, "reset_hidden"):
-            try:
-                agent.reset_hidden()
-            except Exception:
-                pass
 
         # Reset progress tracker
         _, _, _ = sim.step(dt)  # advance once to initialize internal state
@@ -739,290 +564,124 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
         episode_return = 0.0
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
-        offset_history = []  # TS-DWA: abs(offset) rad ; DWA-door-aware: door_sampling_bias
+        offset_history = []  # Track offsets for analysis
 
         # Storage for action repetition
         prev_offset = None
-        prev_collision_count = int(getattr(sim, "collision_count", 0))
-        prev_applied_bias: Optional[float] = None
 
-        # --- Main interaction loop ---
-        if agent_type in ("td3", "td3_lstm"):
-            # TD3 / TD3-LSTM loop (off-policy)
-            hist = None
-            if agent_type == "td3_lstm" and hasattr(agent, "make_history_buffer"):
-                hist = agent.make_history_buffer()
-                hist.reset()
+        for t in range(max_steps):
+            # Build state features
+            state_feat = extract_nav_features(sim)
 
-            t = 0
-            while t < max_steps:
-                # Decision-level observation
-                obs = extract_nav_features(sim)
-                if hist is not None:
-                    hist.push_obs(obs)
+            # Decide whether to sample a new action or reuse previous one
+            if (t % action_select_interval == 0) or (prev_offset is None):
+                # Sample new action via policy (also records state/action/logprob/value in buffer)
+                offset_normalized = agent.select_action(state_feat)  # Returns array
+                prev_offset = float(offset_normalized[0])
+                prev_offset = max(-2.0, min(2.0, prev_offset))
+            else:
+                # Reuse previous action but still log this step into PPO buffer
+                offset_normalized_value = prev_offset
+                # IMPORTANT: use policy_old for consistency with PPO's importance sampling
+                policy_device = next(agent.policy_old.parameters()).device
+                state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
+                state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
+                action_tensor_batch = torch.tensor([[offset_normalized_value]], dtype=torch.float32, device=policy_device)
+                with torch.no_grad():
+                    old_logprob, state_value, _ = agent.policy_old.evaluate(state_tensor_batch, action_tensor_batch)
+                # Match shapes used by select_action: state (no batch), action ([1, action_dim])
+                agent.buffer.states.append(state_tensor_no_batch)
+                agent.buffer.actions.append(action_tensor_batch)
+                agent.buffer.logprobs.append(old_logprob.detach())
+                agent.buffer.state_values.append(state_value.squeeze(0).detach())
 
-                # Action selection
-                if replay.size < td3_start_steps:
-                    action = np.array([random.uniform(-1.0, 1.0)], dtype=np.float32)
-                else:
-                    if hist is not None and hasattr(agent, "select_action_with_history"):
-                        action = agent.select_action_with_history(obs, hist, noise_scale=None)
-                    else:
-                        action = agent.select_action(obs, noise_scale=None)
-                    action = np.asarray(action, dtype=np.float32).reshape(1)
-                action = np.clip(action, -1.0, 1.0)
-                prev_offset = float(action[0])
-                if hist is not None:
-                    hist.push_act(action)
+            # Scale offset from [-1, 1] to [-π/6, π/6] (±30 degrees)
+            max_offset = math.pi / 3  # 60 degrees
+            offset = prev_offset * max_offset
+            
+            # Set offset in the planner (agent's correction to path heading)
+            sim.robot.nav.agent_offset = offset
+            offset_history.append(abs(offset))
 
-                # Apply mapping to planner param
-                smooth_pen = 0.0
-                if algo == "ts_dwa":
-                    max_offset = math.pi / 2
-                    offset = prev_offset * max_offset
-                    sim.robot.nav.agent_offset = float(offset)
-                    offset_history.append(abs(offset))
-                else:
-                    a = max(-1.0, min(1.0, float(prev_offset)))
-                    mapped_bias = float(door_bias_min + ((a + 1.0) * 0.5) * (door_bias_max - door_bias_min))
-                    door_sampling_bias = mapped_bias
-                    if hasattr(sim.robot, "nav") and hasattr(sim.robot.nav, "door_sampling_bias"):
-                        sim.robot.nav.door_sampling_bias = float(door_sampling_bias)
-                    if prev_applied_bias is not None:
-                        smooth_pen = 0.05 * abs(float(door_sampling_bias) - float(prev_applied_bias))
-                    prev_applied_bias = float(door_sampling_bias)
-                    offset = 0.0
-                    offset_history.append(float(door_sampling_bias))
+            # Step simulation
+            _, _, done_flag = sim.step(dt)
 
-                # Step sim (macro-step optionally)
-                inner_steps = action_select_interval if (macro_step and action_select_interval > 1) else 1
-                reward_sum = 0.0
-                done_flag = False
-                last_info = None
+            # Reward (pass offset for regularization)
+            reward, prev_dist, info = compute_reward(sim, prev_dist, offset)
+            episode_return += reward
 
-                if not macro_step:
-                    # single-step transition
-                    _, _, done_flag = sim.step(dt)
-                    reward, prev_dist, info = compute_reward(sim, prev_dist, offset)
-                    # collision delta penalty
-                    cur_collisions = int(getattr(sim, "collision_count", 0))
-                    if cur_collisions > prev_collision_count:
-                        reward -= 5.0 * float(cur_collisions - prev_collision_count)
-                    prev_collision_count = cur_collisions
-                    reward_sum = float(reward)
-                    last_info = info
-                    overlap_counts[info['overlap_type']] += 1
-                    episode_return += float(reward_sum)
-                    t += 1
-                    global_step += 1
-                else:
-                    # N-step accumulated transition
-                    for _ in range(inner_steps):
-                        if t >= max_steps:
-                            break
-                        _, _, done_flag = sim.step(dt)
-                        reward, prev_dist, info = compute_reward(sim, prev_dist, offset)
-                        cur_collisions = int(getattr(sim, "collision_count", 0))
-                        if cur_collisions > prev_collision_count:
-                            reward -= 5.0 * float(cur_collisions - prev_collision_count)
-                        prev_collision_count = cur_collisions
-                        reward_sum += float(reward)
-                        last_info = info
-                        overlap_counts[info['overlap_type']] += 1
-                        episode_return += float(reward)
-                        t += 1
-                        global_step += 1
-                        if done_flag:
-                            break
+            # Track overlap statistics
+            overlap_counts[info['overlap_type']] += 1
 
-                if algo != "ts_dwa":
-                    reward_sum -= float(smooth_pen)
-                    episode_return -= float(smooth_pen)
+            # PPO bookkeeping
+            agent.buffer.rewards.append(float(reward))
+            agent.buffer.is_terminals.append(bool(done_flag))
 
-                # Store transition in replay buffer
-                next_obs = extract_nav_features(sim)
-                replay.store(obs, np.array([prev_offset], dtype=np.float32), float(reward_sum), next_obs, float(done_flag))
+            # Trigger update at fixed timesteps
+            time_step += 1
+            if time_step % update_timestep == 0:
+                update_stats = agent.update()
+                if use_wandb and wandb is not None and update_stats is not None:
+                    wandb.log({
+                        'ppo_loss': update_stats['loss'],
+                        'ppo_policy_loss': update_stats['policy_loss'],
+                        'ppo_value_loss': update_stats['value_loss'],
+                        'ppo_entropy': update_stats['entropy'],
+                        'train_time_step': time_step,
+                    })
 
-                # Updates
-                time_step += 1
-                if replay.size >= td3_update_after and (time_step % td3_update_every == 0):
-                    last_stats = None
-                    for _ in range(td3_update_every):
-                        last_stats = agent.update(replay, batch_size=td3_batch_size)
-                    if use_wandb and wandb is not None and last_stats is not None:
-                        wandb.log({
-                            "td3_loss_q": last_stats.loss_q,
-                            "td3_loss_pi": last_stats.loss_pi,
-                            "td3_q1_mean": last_stats.q1_mean,
-                            "td3_q2_mean": last_stats.q2_mean,
-                            "train_time_step": time_step,
-                        })
+            # if time_step % (10 * update_timestep) == 0:  # e.g. every 10 updates ####### ADD ACTION STD DECAY HERE #######
+            #     agent.decay_action_std(action_std_decay_rate=0.05, min_action_std=0.05)
 
-                if done_flag:
-                    break
-
-        else:
-            # PPO / PPO-LSTM loop (on-policy)
-            t = 0
-            while t < max_steps:
-                # Build state features at decision boundary
-                state_feat = extract_nav_features(sim)
-
-                # Sample a new action and store (state, action, logprob, value) once per macro-step.
-                if hasattr(agent, "select_action_clamped"):
-                    offset_normalized = agent.select_action_clamped(state_feat, clamp=(-1.0, 1.0))
-                    prev_offset = float(offset_normalized[0])
-                else:
-                    offset_normalized = agent.select_action(state_feat)  # Returns array
-                    prev_offset = max(-1.0, min(1.0, float(offset_normalized[0])))
-                    _overwrite_last_ppo_action(agent, state_feat, prev_offset)
-
-                # Apply action mapping to the planner parameter once per macro-step
-                smooth_pen = 0.0
-                if algo == "ts_dwa":
-                    max_offset = math.pi / 2  # 90 degrees
-                    offset = prev_offset * max_offset
-                    sim.robot.nav.agent_offset = float(offset)
-                    offset_history.append(abs(offset))
-                else:
-                    a = max(-1.0, min(1.0, float(prev_offset)))
-                    mapped_bias = float(door_bias_min + ((a + 1.0) * 0.5) * (door_bias_max - door_bias_min))
-
-                    # Gate is currently disabled in this file (kept for future use), but keep the structure.
-                    door_sampling_bias = mapped_bias  # if has_near_person else float(door_bias_base)
-                    if hasattr(sim.robot, "nav") and hasattr(sim.robot.nav, "door_sampling_bias"):
-                        sim.robot.nav.door_sampling_bias = float(door_sampling_bias)
-
-                    if prev_applied_bias is not None:
-                        smooth_pen = 0.05 * abs(float(door_sampling_bias) - float(prev_applied_bias))
-                    prev_applied_bias = float(door_sampling_bias)
-
-                    offset = 0.0
-                    offset_history.append(float(door_sampling_bias))
-
-                # Execute N micro-steps with the same applied action; accumulate reward.
-                reward_sum = 0.0
-                done_flag = False
-                for _ in range(action_select_interval if macro_step else 1):
-                    if t >= max_steps:
-                        break
-
-                    _, _, done_flag = sim.step(dt)
-
-                    reward, prev_dist, info = compute_reward(sim, prev_dist, offset)
-
-                    # Penalize collisions as a *delta* so it is a clear learning signal.
-                    cur_collisions = int(getattr(sim, "collision_count", 0))
-                    if cur_collisions > prev_collision_count:
-                        reward -= 5.0 * float(cur_collisions - prev_collision_count)
-                    prev_collision_count = cur_collisions
-
-                    reward_sum += float(reward)
-                    episode_return += float(reward)
-
-                    # Track overlap stats at the micro-step resolution (keeps the same interpretation as before)
-                    overlap_counts[info['overlap_type']] += 1
-
-                    global_step += 1
-                    t += 1
-
-                    if done_flag:
-                        break
-
-                # Apply smoothness penalty ONCE per macro-step (parameter changed once)
-                if algo != "ts_dwa":
-                    reward_sum -= float(smooth_pen)
-                    episode_return -= float(smooth_pen)
-
-                # PPO bookkeeping: store one reward+terminal per macro-step
-                agent.buffer.rewards.append(float(reward_sum))
-                agent.buffer.is_terminals.append(bool(done_flag))
-
-                # Trigger update at fixed *macro-step* timesteps (buffer entries)
-                time_step += 1
-                if time_step % update_timestep == 0:
-                    update_stats = agent.update()
-                    if use_wandb and wandb is not None and update_stats is not None:
-                        wandb.log({
-                            'ppo_loss': update_stats['loss'],
-                            'ppo_policy_loss': update_stats['policy_loss'],
-                            'ppo_value_loss': update_stats['value_loss'],
-                            'ppo_entropy': update_stats['entropy'],
-                            'train_time_step': time_step,
-                        })
-
-                if done_flag:
-                    # Update at episode boundary as well
-                    update_stats = agent.update()
-                    if use_wandb and wandb is not None and update_stats is not None:
-                        wandb.log({
-                            'ppo_loss': update_stats['loss'],
-                            'ppo_policy_loss': update_stats['policy_loss'],
-                            'ppo_value_loss': update_stats['value_loss'],
-                            'ppo_entropy': update_stats['entropy'],
-                            'train_time_step': time_step,
-                        })
-                    break
+            global_step += 1
+            if done_flag:
+                # Update at episode boundary as well
+                update_stats = agent.update()
+                if use_wandb and wandb is not None and update_stats is not None:
+                    wandb.log({
+                        'ppo_loss': update_stats['loss'],
+                        'ppo_policy_loss': update_stats['policy_loss'],
+                        'ppo_value_loss': update_stats['value_loss'],
+                        'ppo_entropy': update_stats['entropy'],
+                        'train_time_step': time_step,
+                    })
+                break
 
         # Episode metrics
         total_steps = t + 1
         overlap_pct = {k: 100 * v / total_steps for k, v in overlap_counts.items()}
         returns.append(episode_return)
-        # Total collisions this episode (from simulation)
-        episode_collisions = getattr(sim, 'collision_count', 0)
         
         # Offset statistics
         avg_abs_offset = np.mean(offset_history) if offset_history else 0.0
         max_abs_offset = np.max(offset_history) if offset_history else 0.0
-        if algo == "ts_dwa":
-            avg_abs_offset_deg = avg_abs_offset * 180 / math.pi
-            max_abs_offset_deg = max_abs_offset * 180 / math.pi
-        else:
-            avg_abs_offset_deg = float("nan")
-            max_abs_offset_deg = float("nan")
+        avg_abs_offset_deg = avg_abs_offset * 180 / math.pi
+        max_abs_offset_deg = max_abs_offset * 180 / math.pi
 
         print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
-        if algo == "ts_dwa":
-            print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±60°)")
-        else:
-            print(f"  Door sampling bias - Avg: {avg_abs_offset:.3f} | Max: {max_abs_offset:.3f} | (range: [0.6, 0.85])")
+        print(f"  Offsets - Avg: {avg_abs_offset_deg:.1f}° | Max: {max_abs_offset_deg:.1f}° | (range: ±30°)")
 
         if use_wandb and wandb is not None:
-            log_row = {
+            wandb.log({
                 'episode': ep + 1,
-                'algo': algo,
                 'return': episode_return,
                 'steps': total_steps,
-                'collisions': episode_collisions,
                 'overlap_free_pct': overlap_pct['none'],
                 'overlap_person_pct': overlap_pct['person'],
                 'overlap_door_pct': overlap_pct['door'],
                 'overlap_both_pct': overlap_pct['both'],
+                'avg_abs_offset_deg': avg_abs_offset_deg,
+                'max_abs_offset_deg': max_abs_offset_deg,
                 'elapsed_min': (time.time() - start_time) / 60.0,
-            }
-            if algo == "ts_dwa":
-                log_row.update({
-                    'avg_abs_offset_deg': avg_abs_offset_deg,
-                    'max_abs_offset_deg': max_abs_offset_deg,
-                })
-            else:
-                log_row.update({
-                    'avg_door_sampling_bias': float(avg_abs_offset),
-                    'max_door_sampling_bias': float(max_abs_offset),
-                })
-            wandb.log(log_row)
+            })
 
     avg_return = float(np.mean(returns)) if returns else 0.0
 
     # Save policy
     os.makedirs('checkpoints', exist_ok=True)
-    if agent_type in ("td3", "td3_lstm"):
-        ckpt_name = f"{agent_type}_{algo}.pt"
-    else:
-        ckpt_name = "theta_qnet.pt"
-    agent.save(os.path.join('checkpoints', ckpt_name))
-    print(f"Saved policy to checkpoints/{ckpt_name}")
+    agent.save(os.path.join('checkpoints', 'theta_qnet.pt'))
+    print('Saved PPO policy to checkpoints/theta_qnet.pt')
 
     if use_wandb and wandb is not None:
         wandb.summary['avg_return'] = avg_return
@@ -1067,21 +726,7 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Train navigation policy with PPO (agent-agnostic structure)')
-    parser.add_argument('--algo', type=str, default='ts_dwa',
-                        choices=['ts_dwa', 'dwa_door_aware'],
-                        help='Which local planner PPO is controlling: ts_dwa learns a heading offset; dwa_door_aware learns door_sampling_bias.')
-    parser.add_argument('--agent', type=str, default='ppo',
-                        choices=['ppo', 'ppo_lstm', 'td3', 'td3_lstm'],
-                        help='Policy model: feedforward PPO (ppo) or recurrent PPO-LSTM (ppo_lstm).')
-    parser.add_argument('--door-bias-min', type=float, default=0.6,
-                        help='(dwa_door_aware) Min door_sampling_bias when controlled by PPO.')
-    parser.add_argument('--door-bias-max', type=float, default=0.85,
-                        help='(dwa_door_aware) Max door_sampling_bias when controlled by PPO.')
-    parser.add_argument('--door-bias-base', type=float, default=0.8,
-                        help='(dwa_door_aware) Fixed door_sampling_bias used when no nearby people are detected.')
-    parser.add_argument('--bias-people-gate-dist', type=float, default=4.0,
-                        help='(dwa_door_aware) PPO only modulates door_sampling_bias when a person is within this distance (meters).')
-    parser.add_argument('--episodes', type=int, default=300)
+    parser.add_argument('--episodes', type=int, default=500)
     parser.add_argument('--max-steps', type=int, default=3000)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--lr-actor', type=float, default=None)
@@ -1092,9 +737,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--eps-clip', type=float, default=0.2)
     parser.add_argument('--update-timestep', type=int, default=2000)
     parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
-    parser.add_argument('--macro-step', action='store_true',
-                        help='If set, treat action_select_interval as a true frame-skip: apply one action for N sim steps, '
-                             'accumulate reward over those N steps, and store ONE PPO transition per N steps.')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use-wandb', action='store_true')
     parser.add_argument('--wandb-project', type=str, default='PredictiveDWA')
@@ -1110,12 +752,6 @@ def main():
     args = parse_args()
 
     base_config: Dict[str, Any] = {
-        'algo': args.algo,
-        'agent': args.agent,
-        'door_bias_min': args.door_bias_min,
-        'door_bias_max': args.door_bias_max,
-        'door_bias_base': args.door_bias_base,
-        'bias_people_gate_dist': args.bias_people_gate_dist,
         'episodes': args.episodes,
         'max_steps': args.max_steps,
         'learning_rate': args.lr,
@@ -1127,7 +763,6 @@ def main():
         'eps_clip': args.eps_clip,
         'update_timestep': args.update_timestep,
         'action_select_interval': args.action_select_interval,
-        'macro_step': bool(args.macro_step),
         'seed': args.seed,
         'wandb_project': args.wandb_project,
         # Env defaults

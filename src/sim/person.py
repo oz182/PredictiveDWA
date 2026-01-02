@@ -1,8 +1,9 @@
 import pygame
 import numpy as np
 import random
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import math
+import os
 
 class Person:
     """
@@ -20,7 +21,17 @@ class Person:
       only the lateral (orthogonal) component of avoidance is applied to reduce
       oscillations and preserve forward progress.
     """
-    def __init__(self, position: Tuple[float, float], radius: float, speed: float, door_side: str, corridor_width: float, corridor_length: float):
+    def __init__(
+        self,
+        position: Tuple[float, float],
+        radius: float,
+        speed: float,
+        door_side: str,
+        corridor_width: float,
+        corridor_length: float,
+        turn_dist_alpha: float = 2,
+        turn_dist_end_density_ratio: Optional[float] = None,
+    ):
         self.position = np.array(position, dtype=float)
         self.radius = radius
         self.speed = speed
@@ -41,12 +52,128 @@ class Person:
         self.travel_distance = 0
         self.max_distance = random.uniform(3.0, 7.0)  # Distance before disappearing
         self.turn_angle = 0
-        self.turn_dist = random.uniform(self.corridor_width * 0.2, self.corridor_width * 0.5)
+        # Where along the corridor width the person will "turn" into the corridor direction.
+        # Desired distribution:
+        # - triangular-like density on [0, W] that always goes to 0 at W
+        #
+        # The "slope/shape" is controlled by `turn_dist_alpha`:
+        # - alpha = 1.0  -> classic triangular (linear decrease to 0 at W)
+        # - alpha > 1.0  -> steeper drop (more turns near 0)
+        # - alpha < 1.0  -> flatter (more mass toward the end, but still 0 at W)
+        #
+        # Backwards-compat: if `turn_dist_end_density_ratio` is provided, we use the older
+        # linear-end-density form (which may be non-zero at W). Prefer `turn_dist_alpha`.
+        W = float(self.corridor_width)
+        if turn_dist_end_density_ratio is not None:
+            # Linear pdf with configurable end density ratio (may be non-zero at W).
+            r_end = float(turn_dist_end_density_ratio)
+            if not math.isfinite(r_end):
+                r_end = 0.1
+            r_end = max(0.0, min(1.0, r_end))
+
+            u = random.random()
+            k = 1.0 - r_end  # slope factor in [0,1]
+            if k <= 1e-12:
+                y = u
+            else:
+                denom = 1.0 - 0.5 * k
+                disc = 1.0 - 2.0 * k * u * denom
+                y = (1.0 - math.sqrt(max(0.0, disc))) / k
+            y = max(0.0, min(1.0, y))
+            self.turn_dist = W * y
+        else:
+            # Generalized triangular: pdf(y) = (alpha+1) * (1-y)^alpha, y∈[0,1]
+            # CDF: F(y) = 1 - (1-y)^(alpha+1)  =>  y = 1 - (1-u)^(1/(alpha+1))
+            alpha = float(turn_dist_alpha)
+            if (not math.isfinite(alpha)) or alpha < 0.0:
+                alpha = 1.0
+            u = random.random()
+            y = 1.0 - (1.0 - u) ** (1.0 / (alpha + 1.0))
+            self.turn_dist = W * max(0.0, min(1.0, y))
 
         # Proxemic footprint (semi-major/minor axes in meters)
         self.proxemic_axes = np.array([radius * 1.5, radius * 0.5], dtype=float)
         self.proxemic_color = (255, 150, 150, 90)  # RGBA for translucent halo
         self.heading_angle = -math.pi / 2 if self.door_side == "right" else math.pi / 2
+
+        # Optional debug plot: visualize the turn_dist distribution shape once per run.
+        # Enable with: PLOT_TURN_DIST=1
+        # Optional: PLOT_TURN_DIST_BLOCK=1 (block until the plot is closed)
+
+        # self._maybe_plot_turn_dist_distribution(W=W,
+        #                                         turn_dist_alpha=turn_dist_alpha,
+        #                                         turn_dist_end_density_ratio=turn_dist_end_density_ratio)
+
+    _turn_dist_plot_done: bool = False
+
+    @classmethod
+    def _maybe_plot_turn_dist_distribution(
+        cls,
+        W: float,
+        turn_dist_alpha: float,
+        turn_dist_end_density_ratio: Optional[float],
+        n_samples: int = 20000,
+        bins: int = 60,
+    ) -> None:
+        """Plot the sampling distribution for turn_dist (once per process)."""
+        if cls._turn_dist_plot_done:
+            return
+        cls._turn_dist_plot_done = True
+
+        import numpy as _np
+        import matplotlib.pyplot as _plt
+
+        W = float(W) if float(W) > 0 else 1.0
+        xs = _np.linspace(0.0, W, 400)
+
+        # Theoretical (unnormalized) pdf shape
+        if turn_dist_end_density_ratio is not None:
+            r_end = float(turn_dist_end_density_ratio)
+            if not math.isfinite(r_end):
+                r_end = 0.1
+            r_end = max(0.0, min(1.0, r_end))
+            k = 1.0 - r_end
+            pdf = 1.0 - k * (xs / W)  # linear, >=0
+            title = f"turn_dist linear pdf (end_density_ratio={r_end:.3g})"
+
+            # Sample from the same distribution (reuse inverse CDF logic)
+            us = _np.random.rand(n_samples)
+            if k <= 1e-12:
+                ys = us
+            else:
+                denom = 1.0 - 0.5 * k
+                disc = 1.0 - 2.0 * k * us * denom
+                ys = (1.0 - _np.sqrt(_np.maximum(0.0, disc))) / k
+            samples = W * _np.clip(ys, 0.0, 1.0)
+        else:
+            alpha = float(turn_dist_alpha)
+            if (not math.isfinite(alpha)) or alpha < 0.0:
+                alpha = 1.0
+            pdf = (1.0 - xs / W) ** alpha  # shape; normalization not needed for overlay
+            title = f"turn_dist generalized triangular pdf (alpha={alpha:.3g})"
+
+            us = _np.random.rand(n_samples)
+            ys = 1.0 - (1.0 - us) ** (1.0 / (alpha + 1.0))
+            samples = W * _np.clip(ys, 0.0, 1.0)
+
+        # Normalize pdf for overlay (so area roughly matches histogram density)
+        area = float(_np.trapz(pdf, xs))
+        if area > 1e-12:
+            pdf = pdf / area
+
+        _plt.figure()
+        _plt.hist(samples, bins=bins, range=(0.0, W), density=True, alpha=0.5, label="samples")
+        _plt.plot(xs, pdf, linewidth=2.0, label="theoretical pdf (normalized)")
+        _plt.xlabel("turn_dist (meters)")
+        _plt.ylabel("density")
+        _plt.title(title)
+        _plt.grid(True, alpha=0.2)
+        _plt.legend()
+
+        block = os.getenv("PLOT_TURN_DIST_BLOCK", "0") == "1"
+        _plt.show(block=block)
+        if not block:
+            _plt.pause(0.001)
         
     def update(self, dt: float, people: List["Person"] = None, robot=None, corridor_bounds: dict = None):
         """

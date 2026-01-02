@@ -211,8 +211,17 @@ class PPO:
             rewards.insert(0, discounted_reward)
             
         # Normalizing the rewards (guard against tiny buffers / zero-variance)
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+        # rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+        # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+        ############################################################
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(device) ### PRO CHANGE
+
+        if len(rewards) > 1:
+            std = rewards.std(unbiased=False)
+            rewards = (rewards - rewards.mean()) / (std + 1e-7)
+        else:
+            # length 0 or 1: just zero-center at most
+            rewards = rewards - rewards.mean()
 
         # convert list to tensor
         old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).detach().to(device)
@@ -235,7 +244,9 @@ class PPO:
             logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
 
             # match state_values tensor dimensions with rewards tensor
-            state_values = torch.squeeze(state_values)
+            #state_values = torch.squeeze(state_values) # PRO CHANGE
+            state_values = state_values.view(-1)  # shape [N]
+            rewards = rewards.view(-1)            # make sure same shape
             
             # Finding the ratio (pi_theta / pi_theta__old)
             ratios = torch.exp(logprobs - old_logprobs.detach())
@@ -255,7 +266,7 @@ class PPO:
             # take gradient step with gradient clipping for stability
             self.optimizer.zero_grad()
             loss.mean().backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5) ### GRADIENT CLIPPING
+            #nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5) ### GRADIENT CLIPPING
             self.optimizer.step()
 
             policy_losses.append(float(policy_loss.item()))

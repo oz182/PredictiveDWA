@@ -105,7 +105,7 @@ class TSDWA:
         self.w = 0.0
 
         # Re‑use original scoring weights for now; user may tune externally
-        self.weights = {"goal": 0.1, "clearance": 0.8, "velocity": 0.1}
+        self.weights = {"heading": 0.2, "goal": 0.4, "clearance": 0.3, "velocity": 0.1}
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
@@ -147,6 +147,7 @@ class TSDWA:
         theta_ph_path = self._extract_heading(global_path)
         agent_offset = getattr(self, 'agent_offset', 0.0)  # Agent's correction
         theta_ph = theta_ph_path + agent_offset  # Combined heading
+        #print(f"agent_offset: {agent_offset}")
         
         # Set curvature to 0 (agent controls direction via offset)
         kappa = 0.0
@@ -165,12 +166,14 @@ class TSDWA:
             traj = self._predict_trajectory(v_sample, w_sample)
             self.trajectories.append(traj)
 
+            h = self._heading_score(v_sample, w_sample)
             g = self._goal_score(traj)
             c = self._clearance_score(traj, people)
             vel_score = v_sample / self.max_speed
 
             score = (
-                self.weights["goal"] * g
+                self.weights["heading"] * h
+                + self.weights["goal"] * g
                 + self.weights["clearance"] * c
                 + self.weights["velocity"] * vel_score
             )
@@ -198,6 +201,198 @@ class TSDWA:
         ])
         self.position += self.velocity * dt
         return self.velocity, self.position, self.goal
+
+    def update_real(
+        self,
+        people: List[Person],
+        costmap,
+        position,
+        orientation: float,
+        global_path: List[np.ndarray],
+    ):
+        """Real-world update (sensor-driven pose, costmap clearance).
+
+        - Sets `self.position` and `self.orientation` directly from sensors.
+        - Uses `clearance_score_costmap()` for clearance (plus corridor bounds).
+        - Does NOT integrate pose forward (no dt-based motion update).
+        """
+        if self.goal is None:
+            return
+
+        # Update pose from sensors
+        self.position[0] = float(position[0])
+        self.position[1] = float(position[1])
+        self.orientation = float(orientation)
+
+        # 1) dynamic window
+        dw = self._dynamic_window()
+
+        # 2) path heading + agent offset
+        theta_ph_path = self._extract_heading(global_path)
+        agent_offset = getattr(self, "agent_offset", 0.0)
+        theta_ph = theta_ph_path + agent_offset
+        kappa = 0.0
+
+        # 3) targeted samples
+        samples = self._generate_ts_samples(dw, theta_ph, kappa)
+
+        # 4) rollout + scoring
+        best_score = -float("inf")
+        best_v, best_w = 0.0, 0.0
+        self.trajectories.clear()
+
+        for v_sample, w_sample in samples:
+            traj = self._predict_trajectory(v_sample, w_sample)
+            self.trajectories.append(traj)
+
+            h = self._heading_score(v_sample, w_sample)
+            g = self._goal_score(traj)
+            c = self.clearance_score_costmap(traj, costmap)
+            vel_score = v_sample / self.max_speed if self.max_speed > 1e-9 else 0.0
+
+            score = (
+                self.weights["heading"] * h
+                + self.weights["goal"] * g
+                + self.weights["clearance"] * c
+                + self.weights["velocity"] * vel_score
+            )
+            if score > best_score:
+                best_score = score
+                best_v, best_w = float(v_sample), float(w_sample)
+                self.best_trajectory = traj
+
+        # 5) store selected command; do NOT integrate pose
+        self.v, self.w = best_v, best_w
+        self.velocity = np.array([self.v * math.cos(self.orientation), self.v * math.sin(self.orientation)])
+        return self.velocity, self.position, self.goal
+
+    def clearance_score_costmap(self, trajectory: np.ndarray, costmap):
+        """Costmap-based clearance score (DWA-style), with corridor bounds enforced.
+
+        Behaviour matches `algo.dwa.DWA.clearance_score_from_costmap()`:
+        - reject if any lethal/unknown cell is within `self.radius`
+        - else score = min_clearance / safe_distance clipped to [0,1]
+        """
+        if costmap is None:
+            return 1.0
+
+        # --- 1) Optional hard corridor wall constraint ---
+        if hasattr(self, "corridor_bounds") and self.corridor_bounds is not None:
+            b = self.corridor_bounds
+            for p in trajectory:
+                if (p[0] - b["x_min"] - self.radius) <= 0:
+                    return -float("inf")
+                if (b["x_max"] - p[0] - self.radius) <= 0:
+                    return -float("inf")
+                if (p[1] - b["y_min"] - self.radius) <= 0:
+                    return -float("inf")
+                if (b["y_max"] - p[1] - self.radius) <= 0:
+                    return -float("inf")
+
+        lethal_threshold = 95
+        treat_unknown_as_obstacle = True
+
+        has_costmap2d_api = hasattr(costmap, "worldToMap") and hasattr(costmap, "getCost")
+
+        if has_costmap2d_api:
+            try:
+                width = int(costmap.getSizeInCellsX())
+                height = int(costmap.getSizeInCellsY())
+            except Exception:
+                width, height = None, None
+
+            def world_to_map(wx: float, wy: float):
+                out = costmap.worldToMap(wx, wy)
+                if isinstance(out, tuple) and len(out) == 2:
+                    return True, int(out[0]), int(out[1])
+                if isinstance(out, tuple) and len(out) == 3:
+                    return bool(out[0]), int(out[1]), int(out[2])
+                return False, 0, 0
+
+            def get_cost(mx: int, my: int) -> int:
+                return int(costmap.getCost(mx, my))
+
+            res = float(getattr(costmap, "resolution", 0.05))
+
+            def cell_center_world(mx: int, my: int):
+                if hasattr(costmap, "mapToWorld"):
+                    out = costmap.mapToWorld(mx, my)
+                    if isinstance(out, tuple) and len(out) == 2:
+                        return float(out[0]), float(out[1])
+                return float(mx) * res, float(my) * res
+        else:
+            try:
+                res = float(costmap.info.resolution)
+                width = int(costmap.info.width)
+                height = int(costmap.info.height)
+                origin_x = float(costmap.info.origin.position.x)
+                origin_y = float(costmap.info.origin.position.y)
+                data = costmap.data
+            except AttributeError:
+                return 1.0
+
+            def world_to_map(wx: float, wy: float):
+                mx = int((wx - origin_x) / res)
+                my = int((wy - origin_y) / res)
+                ok = (0 <= mx < width) and (0 <= my < height)
+                return ok, mx, my
+
+            def get_cost(mx: int, my: int) -> int:
+                return int(data[my * width + mx])
+
+            def cell_center_world(mx: int, my: int):
+                cx = origin_x + (mx + 0.5) * res
+                cy = origin_y + (my + 0.5) * res
+                return cx, cy
+
+        max_search_dist_m = max(2.0, float(self.radius) + 1.0)
+        search_r_cells = max(1, int(math.ceil(max_search_dist_m / res)))
+
+        min_clearance_m = float("inf")
+
+        for p in trajectory:
+            wx, wy = float(p[0]), float(p[1])
+            ok, mx0, my0 = world_to_map(wx, wy)
+            if not ok:
+                return -float("inf")
+
+            local_min_obst_dist_m = float("inf")
+
+            for dy in range(-search_r_cells, search_r_cells + 1):
+                my = my0 + dy
+                if height is not None and (my < 0 or my >= height):
+                    continue
+                for dx in range(-search_r_cells, search_r_cells + 1):
+                    mx = mx0 + dx
+                    if width is not None and (mx < 0 or mx >= width):
+                        continue
+
+                    cell_cost = get_cost(mx, my)
+                    is_unknown = cell_cost < 0
+                    is_lethal = (cell_cost >= lethal_threshold) or (treat_unknown_as_obstacle and is_unknown)
+                    if not is_lethal:
+                        continue
+
+                    cx, cy = cell_center_world(mx, my)
+                    dist_m = math.hypot(wx - cx, wy - cy)
+                    if dist_m < local_min_obst_dist_m:
+                        local_min_obst_dist_m = dist_m
+
+            if local_min_obst_dist_m == float("inf"):
+                local_min_obst_dist_m = max_search_dist_m
+
+            if local_min_obst_dist_m <= float(self.radius):
+                return -float("inf")
+
+            clearance_here = local_min_obst_dist_m - float(self.radius)
+            if clearance_here < min_clearance_m:
+                min_clearance_m = clearance_here
+
+        if min_clearance_m == float("inf"):
+            return 1.0
+
+        safe_distance = 1.0
+        return min(max(min_clearance_m / safe_distance, 0.0), 1.0)
 
     # ------------------------------------------------------------------
     # ─── INTERNAL UTILITIES ─────────────────────────────────────────────
@@ -750,6 +945,36 @@ class TSDWA:
             traj.append(pos.copy())
             time += self.dt
         return np.array(traj)
+
+    def _heading_score(self, v: float, w: float) -> float:
+        """Score based on how well the trajectory heads toward the goal.
+        
+        Classic DWA uses the angle between current heading and goal direction.
+        We also penalize excessive rotation to prevent wrap-around exploits.
+        """
+        if v < 0.01:  # Penalize near-zero velocity heavily
+            return -1.0
+        
+        # Goal direction from current position
+        goal_direction = self.goal - self.position
+        desired_theta = math.atan2(goal_direction[1], goal_direction[0])
+        
+        # Heading after ONE time step (not full predict_time to avoid wrap-around)
+        next_theta = self.orientation + w * self.dt
+        next_theta = self._normalize_angle(next_theta)
+        
+        # Angular difference between next heading and goal direction
+        angle_diff = abs(self._normalize_angle(desired_theta - next_theta))
+        
+        # Base score: 1.0 when aligned, 0.0 when perpendicular, negative when opposite
+        base_score = 1.0 - (angle_diff / math.pi)
+        
+        # Penalize high angular velocities to prevent spinning (diminishing returns)
+        # Trajectories with |w| > pi/2 get progressively penalized
+        #rotation_penalty = max(0.0, (abs(w) - math.pi/2) / (math.pi/2))  # 0 to 1 for w from pi/2 to pi
+        #rotation_penalty = max(0.0, (abs(w) - math.pi) / (math.pi))  # 0 to 1 for w from pi to 2pi
+        rotation_penalty = 0.0
+        return base_score - 0.3 * rotation_penalty
 
     def _goal_score(self, traj):
         final = traj[-1]

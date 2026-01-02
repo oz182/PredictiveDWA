@@ -56,13 +56,20 @@ class Robot:
         # ------ Choosing the local planner type ------
     
         #self.nav = Simple(self.position, self.velocity, self.max_speed, self.goal, self.radius)
-        #self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
-        self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        #self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
         #self.nav = TSDWA_2(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
 
 
-        #self.nav_type = "dwa"
-        self.nav_type = "ts_dwa"
+        self.nav_type = "dwa_door_aware"
+        #self.nav_type = "ts_dwa"
+        if self.nav_type == "ts_dwa":
+            self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        elif self.nav_type == "dwa":
+            self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        elif self.nav_type == "dwa_door_aware":
+            self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+            self.nav.door_aware_sampling = True
         
         # ------ Choosing the local planner type ------
 
@@ -70,6 +77,16 @@ class Robot:
         self.state = None
         self.reward = None
         self.done = False
+
+    def set_nav_type(self, nav_type: str):
+        self.nav_type = nav_type
+        if self.nav_type == "ts_dwa":
+            self.nav = TSDWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        elif self.nav_type == "dwa":
+            self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+        elif self.nav_type == "dwa_door_aware":
+            self.nav = DWA(self.position, self.velocity, self.max_speed, self.goal, self.radius, self.corridor_bounds)
+            self.nav.door_aware_sampling = True
     
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
@@ -427,7 +444,7 @@ class Robot:
             # Draw direction indicator
             end_pos = (self.position + self.velocity * 0.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
-        elif self.nav_type in ("dwa", "ts_dwa"):
+        elif self.nav_type in ("dwa", "ts_dwa", "dwa_door_aware"):
             # Draw traversed path (polyline)
             if hasattr(self, 'path_points') and len(self.path_points) > 1:
                 path_pts = [(p * scale + offset).astype(int) for p in self.path_points]

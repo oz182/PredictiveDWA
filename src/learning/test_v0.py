@@ -61,9 +61,9 @@ def plot_and_print_offsets(offset_vals):
 
 
 def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action_select_interval=1):
-    random.seed(123)
-    np.random.seed(123)
-    torch.manual_seed(123)
+    random.seed(4237658)
+    np.random.seed(4237658)
+    torch.manual_seed(4237658)
 
     agent = load_model(model_path)
 
@@ -79,14 +79,8 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
         clock = None
 
     for ep in range(episodes):
-        # Match training: random number of people between 0 and 5 each episode
-        num_people = random.randint(8, 9)
-        sim = Simulation(
-            corridor_width=4.0,
-            door_side='right',
-            num_people=num_people,
-            people_speeds=[random.uniform(1.1, 1.2) for _ in range(10)],
-        )
+        sim = Simulation(corridor_width=4.0, door_side='right', num_people=5,
+                         people_speeds=[random.uniform(1.1, 1.2) for _ in range(10)])
         # Warm-up step to init internal state
         _, _, _ = sim.step(1/60.0)
 
