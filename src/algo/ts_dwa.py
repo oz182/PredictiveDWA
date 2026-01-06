@@ -109,6 +109,12 @@ class TSDWA:
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
+        
+        # Agent-controlled sample space modification
+        # This allows RL agent to directly control w_min, restricting the angular velocity sample space
+        # Key insight: This gives the agent VETO power over certain turning directions
+        # without modifying the score function
+        self.agent_w_min = None  # If set, overrides w_min for sampling (restricts right turns if positive)
 
     # ---------------------------------------------------------------------
     # ─── PUBLIC API (matches original DWA) ────────────────────────────────
@@ -686,6 +692,12 @@ class TSDWA:
     ) -> List[Tuple[float, float]]:
         """Polar velocity generator with path‑aware bias."""
         v_min, v_max, w_min, w_max = dw
+        
+        # Apply agent-controlled w_min if set
+        # This is the KEY mechanism: agent restricts the angular velocity sample space
+        # Higher agent_w_min → fewer right-turn (positive ω) samples allowed
+        if self.agent_w_min is not None:
+            w_min = max(w_min, self.agent_w_min)  # Use the more restrictive of the two
 
         # Translational sampling in polar space ---------------------------
         headings = np.linspace(

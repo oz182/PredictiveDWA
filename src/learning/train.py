@@ -15,6 +15,7 @@ import torch.nn as nn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
 from agents.ppo import PPO
+from agents.td3 import TD3
 
 # Optional third-party integrations
 
@@ -410,6 +411,120 @@ def compute_min_obstacle_distance(sim) -> tuple[float, float]:
     return min_person_dist, min_door_dist
 
 
+def compute_intent_reward(sim, agent_w_min: float) -> float:
+    """
+    Reward the agent for setting appropriate w_min based on door proximity.
+    
+    The agent controls w_min (minimum angular velocity):
+    - Higher w_min → restricts right turns (positive ω not sampled)
+    - Lower w_min → allows all turns (default behavior)
+    
+    Reward logic:
+    - Door on RIGHT + close → reward HIGH w_min (agent correctly restricts right turns)
+    - Far from door → reward LOW w_min (agent correctly doesn't interfere)
+    
+    Args:
+        sim: Simulation object
+        agent_w_min: Agent's w_min setting (radians, higher = more right-turn restriction)
+        
+    Returns:
+        Intent reward value (positive if w_min matches situation)
+    """
+    robot_pos = np.array(sim.robot.position, dtype=float)
+    door_pos = np.array(sim.robot.door_position, dtype=float)
+    bounds = sim.robot.corridor_bounds
+    
+    # Door position relative to corridor center
+    corridor_mid_y = (bounds['y_min'] + bounds['y_max']) / 2.0
+    door_on_right = door_pos[1] > corridor_mid_y
+    
+    # Relative door position
+    door_dx = door_pos[0] - robot_pos[0]  # positive = door ahead
+    dist_to_door = np.linalg.norm(robot_pos - door_pos)
+    
+    INFLUENCE_RANGE = 5.0  # meters
+    W_MIN_NEUTRAL = -math.pi  # Default w_min (all turns allowed)
+    W_MIN_RESTRICT = math.pi / 4  # w_min for restricting right turns
+    
+    # Calculate "desired" w_min based on situation
+    if door_dx < 0.5 or dist_to_door > INFLUENCE_RANGE:
+        # Door is behind or too far - should use neutral w_min (don't restrict)
+        desired_w_min = W_MIN_NEUTRAL
+    elif door_on_right:
+        # Door is ahead on the right - should restrict right turns (high w_min)
+        proximity = 1.0 - dist_to_door / INFLUENCE_RANGE
+        # Interpolate between neutral and restrictive based on proximity
+        desired_w_min = W_MIN_NEUTRAL + proximity * (W_MIN_RESTRICT - W_MIN_NEUTRAL)
+    else:
+        # Door is on the left - w_min doesn't help here (would need w_max control)
+        # For now, just use neutral
+        desired_w_min = W_MIN_NEUTRAL
+    
+    # Reward alignment between agent's w_min and desired w_min
+    # Normalize both to [0, 1] range for comparison
+    w_min_range = math.pi / 2 - (-math.pi)  # Total range: -π to π/2
+    agent_normalized = (agent_w_min - (-math.pi)) / w_min_range
+    desired_normalized = (desired_w_min - (-math.pi)) / w_min_range
+    
+    # Reward: 1 when perfect match, 0 when maximally different
+    alignment = 1.0 - abs(agent_normalized - desired_normalized)
+    
+    # Convert to reward: positive when aligned, negative when misaligned
+    intent_reward = (alignment - 0.5) * 1.0  # Range [-0.5, 0.5]
+    
+    return float(intent_reward)
+
+
+def compute_position_reward(sim) -> float:
+    """
+    Reward being on the correct side of the corridor when near the door's x-position.
+    
+    This directly rewards the spatial outcome we want: if door is on the right,
+    the robot should be on the left side of the corridor when passing by.
+    
+    Args:
+        sim: Simulation object
+        
+    Returns:
+        Position reward value (positive if on correct side, negative if not)
+    """
+    robot_pos = np.array(sim.robot.position, dtype=float)
+    door_pos = np.array(sim.robot.door_position, dtype=float)
+    bounds = sim.robot.corridor_bounds
+    
+    # Corridor center y
+    corridor_mid_y = (bounds['y_min'] + bounds['y_max']) / 2.0
+    corridor_width = bounds['y_max'] - bounds['y_min']
+    
+    # Only apply when near door x-position
+    x_dist = abs(robot_pos[0] - door_pos[0])
+    X_INFLUENCE = 3.0  # meters - influence zone around door x position
+    
+    if x_dist > X_INFLUENCE:
+        # Not near door x-position
+        return 0.0
+    
+    # Determine which side door is on and where robot is
+    door_on_right = door_pos[1] > corridor_mid_y  # door at high y = right side
+    robot_y_offset = robot_pos[1] - corridor_mid_y  # positive = robot on right side
+    
+    # Normalize robot's y-position to [-1, 1] range within corridor
+    robot_y_normalized = robot_y_offset / (corridor_width / 2.0)
+    robot_y_normalized = np.clip(robot_y_normalized, -1.0, 1.0)
+    
+    # Proximity factor: stronger reward when closer to door x
+    proximity_factor = 1.0 - x_dist / X_INFLUENCE
+    
+    if door_on_right:
+        # Door on right (high y) → reward being on left (low y, negative offset)
+        position_reward = -robot_y_normalized * proximity_factor * 0.3
+    else:
+        # Door on left (low y) → reward being on right (high y, positive offset)
+        position_reward = robot_y_normalized * proximity_factor * 0.3
+    
+    return float(position_reward)
+
+
 def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0, 
                    prev_collision_count: int = 0) -> tuple[float, float, int, dict]:
     """
@@ -420,6 +535,8 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     2. Obstacle avoidance: Positive reward for staying clear, penalty for overlap
     3. Distance-based shaping: Continuous signal as robot approaches obstacles
     4. Collision penalty: Large penalty for actual collisions
+    5. Intent reward: Immediate feedback for correct steering direction
+    6. Position reward: Reward being on correct side of corridor near door
     
     Returns (reward, new_distance, new_collision_count, info)
     """
@@ -437,23 +554,23 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     reward += progress_reward
     
     # ==========================================================================
-    # 2. OBSTACLE OVERLAP REWARD - Primary avoidance signal
+    # 2. OBSTACLE OVERLAP REWARD - Primary avoidance signal (INCREASED PENALTIES)
     # ==========================================================================
     overlap_info = check_robot_overlap(sim)
     overlap_type = overlap_info['overlap_type']
     
     if overlap_type == 'none':
-        # Negative reward for staying in free space
+        # Small negative to encourage efficiency
         overlap_reward = -0.01
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
-        overlap_reward = -1.5
-    elif overlap_type == 'door':
-        # Penalty for being in door's inflation zone
         overlap_reward = -2.0
+    elif overlap_type == 'door':
+        # INCREASED: Stronger penalty for being in door's inflation zone
+        overlap_reward = -5.0
     elif overlap_type == 'both':
-        # Larger penalty for being in both zones
-        overlap_reward = -3.0
+        # INCREASED: Larger penalty for being in both zones
+        overlap_reward = -6.0
     else:
         overlap_reward = 0.0
     
@@ -464,20 +581,19 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     # ==========================================================================
     min_person_dist, min_door_dist = compute_min_obstacle_distance(sim)
     
-    # Shaping zone: give continuous reward based on proximity to obstacles
-    # This helps the agent learn to keep distance BEFORE entering overlap zone
-    shaping_threshold = float('inf') #2.0  # Start shaping within 2m of obstacles
+    # ENABLED: Shaping zone gives continuous reward based on proximity to obstacles
+    shaping_threshold = 3.0  # Start shaping within 3m of obstacles
     
     shaping_reward = 0.0
     if min_person_dist < shaping_threshold and min_person_dist > 0:
         # Closer to person = more negative (linear shaping)
-        shaping_reward += -0.1 * (1.0 - min_person_dist / shaping_threshold)
+        shaping_reward += -0.15 * (1.0 - min_person_dist / shaping_threshold)
     
     if min_door_dist < shaping_threshold and min_door_dist > 0:
-        # Closer to door = more negative
-        shaping_reward += -0.1 * (1.0 - min_door_dist / shaping_threshold)
+        # Closer to door = more negative (stronger than person)
+        shaping_reward += -0.25 * (1.0 - min_door_dist / shaping_threshold)
     
-    #reward += shaping_reward
+    reward += shaping_reward  # ENABLED
     
     # ==========================================================================
     # 4. COLLISION PENALTY - Large penalty for actual physical collisions
@@ -486,10 +602,22 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
     new_collisions = current_collision_count - prev_collision_count
     
     if new_collisions > 0:
-        reward += -8.0 * new_collisions  # Large penalty per collision
+        reward += -10.0 * new_collisions  # INCREASED: Large penalty per collision
     
     # ==========================================================================
-    # 5. GOAL REACHED BONUS
+    # 5. INTENT REWARD - Immediate feedback for correct steering direction
+    # ==========================================================================
+    intent_reward = compute_intent_reward(sim, offset)
+    reward += intent_reward
+    
+    # ==========================================================================
+    # 6. POSITION REWARD - Reward being on correct side of corridor near door
+    # ==========================================================================
+    position_reward = compute_position_reward(sim)
+    reward += position_reward
+    
+    # ==========================================================================
+    # 7. GOAL REACHED BONUS
     # ==========================================================================
     if dist < 1.0:  # Goal reached
         reward += 15.0  # Large positive reward for completing the task
@@ -509,6 +637,8 @@ def compute_reward(sim, progress_prev_dist: float, offset: float = 0.0,
         'progress_reward': progress_reward,
         'overlap_reward': overlap_reward,
         'shaping_reward': shaping_reward,
+        'intent_reward': intent_reward,
+        'position_reward': position_reward,
     }
 
     return reward, dist, current_collision_count, info
@@ -796,6 +926,282 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     return avg_return
 
 
+def train_td3(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str] = None) -> float:
+    """
+    Train navigation policy using TD3 (Twin Delayed DDPG).
+    
+    TD3 is better suited than PPO for this problem because:
+    - Off-policy: Can reuse past experiences via replay buffer
+    - More sample efficient: Learns from same experience multiple times
+    - Designed for continuous control: Better handles continuous offset action
+    - Deterministic policy: Clearer action selection
+    """
+    seed = int(config.get('seed', 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    # Action space: single offset value for heading adjustment
+    num_actions = 1
+
+    # Environment / training hyperparameters
+    gamma = float(config.get('gamma', 0.99))
+    lr_actor = float(config.get('lr_actor', config.get('learning_rate', 3e-4)))
+    lr_critic = float(config.get('lr_critic', config.get('learning_rate', 3e-4)))
+    
+    # TD3-specific parameters
+    tau = float(config.get('tau', 0.005))  # Soft update coefficient
+    policy_noise = float(config.get('policy_noise', 0.2))  # Target policy smoothing
+    noise_clip = float(config.get('noise_clip', 0.5))
+    policy_delay = int(config.get('policy_delay', 2))  # Delayed policy updates
+    buffer_size = int(config.get('buffer_size', 100000))
+    batch_size = int(config.get('batch_size', 256))
+    exploration_noise = float(config.get('exploration_noise', 0.1))
+    warmup_steps = int(config.get('warmup_steps', 1000))
+    updates_per_step = int(config.get('updates_per_step', 1))  # Gradient steps per env step
+
+    # Env defaults
+    dt = float(config.get('dt', 1/60.0))
+    corridor_width = float(config.get('corridor_width', 4.0))
+    num_people = int(config.get('num_people', 3))
+    people_speed_min = float(config.get('people_speed_min', 0.6))
+    people_speed_max = float(config.get('people_speed_max', 1.2))
+
+    # Infer input feature dimension using a temporary simulation
+    tmp_sim = Simulation(
+        corridor_width=corridor_width,
+        door_side='right',
+        num_people=num_people,
+        people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
+        door_halo_radius=1.8,
+        door_position_x=8.0,
+    )
+    _ = tmp_sim.step(dt)
+    input_dim = int(len(extract_nav_features(tmp_sim)))
+
+    # Build TD3 agent
+    hidden_size = int(config.get('hidden_size', 256))  # Larger default for TD3
+    agent = TD3(
+        state_dim=input_dim,
+        action_dim=num_actions,
+        max_action=1.0,  # Actions in [-1, 1], scaled later
+        hidden_dim=hidden_size,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
+        gamma=gamma,
+        tau=tau,
+        policy_noise=policy_noise,
+        noise_clip=noise_clip,
+        policy_delay=policy_delay,
+        buffer_size=buffer_size,
+        batch_size=batch_size,
+        exploration_noise=exploration_noise,
+        warmup_steps=warmup_steps,
+    )
+
+    if use_wandb and wandb is not None:
+        wandb.init(project=str(config.get('wandb_project', 'PredictiveDWA-TD3')),
+                   name=run_name, config=config, allow_val_change=True)
+
+    # Training loop
+    episodes = int(config.get('episodes', 100))
+    max_steps = int(config.get('max_steps', 3000))
+
+    global_step = 0
+    returns = []
+    start_time = time.time()
+    
+    # Moving average for logging
+    recent_returns = deque(maxlen=20)
+
+    for ep in range(episodes):
+        # Get curriculum parameters for this episode
+        curriculum = get_curriculum_params(ep, episodes)
+        
+        # Sample door parameters from curriculum ranges
+        door_halo_radius = random.uniform(*curriculum['door_halo_radius_range'])
+        door_position_x = random.uniform(*curriculum['door_position_x_range'])
+        door_side_param = None if curriculum['randomize_door_side'] else 'right'
+        
+        sim = Simulation(
+            corridor_width=corridor_width,
+            door_side=door_side_param,
+            num_people=num_people,
+            people_speeds=[random.uniform(people_speed_min, people_speed_max) for _ in range(10)],
+            door_halo_radius=door_halo_radius,
+            door_position_x=door_position_x,
+        )
+
+        # Reset progress tracker
+        _, _, _ = sim.step(dt)
+        robot_pos = sim.robot.position
+        goal_pos = sim.robot.goal
+        prev_dist = float(np.linalg.norm(goal_pos - robot_pos))
+        prev_collision_count = 0
+
+        episode_return = 0.0
+        overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
+        offset_history = []
+        reward_components = {
+            'progress': 0.0, 
+            'overlap': 0.0, 
+            'shaping': 0.0,
+            'intent': 0.0,
+            'position': 0.0,
+        }
+        
+        # Loss tracking
+        episode_losses = {'critic': [], 'actor': [], 'q1': [], 'q2': []}
+
+        # Get initial state
+        state = extract_nav_features(sim)
+
+        for t in range(max_steps):
+            # Select action (with exploration noise during training)
+            action = agent.select_action(state, add_noise=True)
+            action_normalized = float(action[0])
+            action_normalized = max(-1.0, min(1.0, action_normalized))
+            
+            # NEW ACTION SPACE: Agent controls w_min (minimum angular velocity)
+            # This directly restricts the sample space without changing the score function
+            # 
+            # Mapping: action in [-1, 1] -> w_min in [-π, π/2]
+            # - action = -1 -> w_min = -π (all turns allowed, default behavior)
+            # - action = 0  -> w_min = -π/4 (some right-turn restriction)
+            # - action = +1 -> w_min = π/2 (strong right-turn restriction, only left turns allowed)
+            #
+            # This is the KEY mechanism: agent can VETO certain angular velocities
+            w_min_range = (-math.pi, math.pi / 2)  # Range for w_min
+            agent_w_min = w_min_range[0] + (action_normalized + 1.0) / 2.0 * (w_min_range[1] - w_min_range[0])
+            
+            # Set w_min in the planner - this directly affects which trajectories are sampled
+            sim.robot.nav.agent_w_min = agent_w_min
+            offset_history.append(agent_w_min)  # Track w_min values
+
+            # Step simulation
+            _, _, done_flag = sim.step(dt)
+
+            # Get next state
+            next_state = extract_nav_features(sim)
+
+            # Compute reward (pass agent_w_min for intent reward calculation)
+            reward, prev_dist, prev_collision_count, info = compute_reward(
+                sim, prev_dist, agent_w_min, prev_collision_count
+            )
+            episode_return += reward
+
+            # Store transition in replay buffer
+            agent.store_transition(state, action, reward, next_state, float(done_flag))
+
+            # Update agent (multiple gradient steps per env step for efficiency)
+            for _ in range(updates_per_step):
+                update_stats = agent.update()
+                if update_stats is not None:
+                    episode_losses['critic'].append(update_stats['critic_loss'])
+                    episode_losses['actor'].append(update_stats['actor_loss'])
+                    episode_losses['q1'].append(update_stats['q1_mean'])
+                    episode_losses['q2'].append(update_stats['q2_mean'])
+
+            # Track statistics
+            overlap_counts[info['overlap_type']] += 1
+            reward_components['progress'] += info['progress_reward']
+            reward_components['overlap'] += info['overlap_reward']
+            reward_components['shaping'] += info['shaping_reward']
+            reward_components['intent'] += info['intent_reward']
+            reward_components['position'] += info['position_reward']
+
+            state = next_state
+            global_step += 1
+
+            if done_flag:
+                break
+
+        # Episode metrics
+        total_steps = t + 1
+        overlap_pct = {k: 100 * v / total_steps for k, v in overlap_counts.items()}
+        returns.append(episode_return)
+        recent_returns.append(episode_return)
+        
+        # w_min statistics (agent's sample space control)
+        avg_w_min = np.mean(offset_history) if offset_history else -math.pi
+        max_w_min = np.max(offset_history) if offset_history else -math.pi
+        avg_w_min_deg = avg_w_min * 180 / math.pi
+        max_w_min_deg = max_w_min * 180 / math.pi
+
+        # Average losses
+        avg_critic_loss = np.mean(episode_losses['critic']) if episode_losses['critic'] else 0.0
+        avg_actor_loss = np.mean(episode_losses['actor']) if episode_losses['actor'] else 0.0
+        avg_q1 = np.mean(episode_losses['q1']) if episode_losses['q1'] else 0.0
+        avg_q2 = np.mean(episode_losses['q2']) if episode_losses['q2'] else 0.0
+        
+        # Moving average return
+        avg_recent_return = np.mean(recent_returns) if recent_returns else 0.0
+
+        print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Avg(20): {avg_recent_return:.2f} | Steps: {total_steps}")
+        print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
+        print(f"  Rewards - Progress: {reward_components['progress']:.2f} | Overlap: {reward_components['overlap']:.2f} | Shaping: {reward_components['shaping']:.2f}")
+        print(f"           Intent: {reward_components['intent']:.2f} | Position: {reward_components['position']:.2f}")
+        print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
+        print(f"  w_min - Avg: {avg_w_min_deg:.1f}° | Max: {max_w_min_deg:.1f}° | Buffer: {len(agent.buffer)} | (range: -180° to 90°)")
+        if episode_losses['critic']:
+            print(f"  TD3 - Critic: {avg_critic_loss:.4f} | Actor: {avg_actor_loss:.4f} | Q1: {avg_q1:.2f} | Q2: {avg_q2:.2f}")
+
+        if use_wandb and wandb is not None:
+            wandb.log({
+                'episode': ep + 1,
+                'return': episode_return,
+                'return_avg20': avg_recent_return,
+                'steps': total_steps,
+                # Reward breakdown
+                'reward_progress': reward_components['progress'],
+                'reward_overlap': reward_components['overlap'],
+                'reward_shaping': reward_components['shaping'],
+                'reward_intent': reward_components['intent'],
+                'reward_position': reward_components['position'],
+                # Overlap statistics
+                'overlap_free_pct': overlap_pct['none'],
+                'overlap_person_pct': overlap_pct['person'],
+                'overlap_door_pct': overlap_pct['door'],
+                'overlap_both_pct': overlap_pct['both'],
+                # w_min statistics (agent's sample space control)
+                'avg_w_min_deg': avg_w_min_deg,
+                'max_w_min_deg': max_w_min_deg,
+                'avg_w_min_rad': avg_w_min,
+                # TD3-specific
+                'td3/critic_loss': avg_critic_loss,
+                'td3/actor_loss': avg_actor_loss,
+                'td3/q1_mean': avg_q1,
+                'td3/q2_mean': avg_q2,
+                'td3/buffer_size': len(agent.buffer),
+                'td3/exploration_noise': agent.exploration_noise,
+                # Curriculum
+                'curriculum_stage': curriculum['stage'],
+                'door_halo_radius': door_halo_radius,
+                'door_position_x': door_position_x,
+                'door_side': sim.door_side,
+                'elapsed_min': (time.time() - start_time) / 60.0,
+            })
+        
+        # Decay exploration noise over training
+        if ep > 0 and ep % 50 == 0:
+            new_noise = max(0.05, agent.exploration_noise * 0.9)
+            agent.set_exploration_noise(new_noise)
+            print(f"  >> Reduced exploration noise to {new_noise:.3f}")
+
+    avg_return = float(np.mean(returns)) if returns else 0.0
+
+    # Save policy
+    os.makedirs('checkpoints', exist_ok=True)
+    agent.save(os.path.join('checkpoints', 'td3_policy.pt'))
+    print('Saved TD3 policy to checkpoints/td3_policy.pt')
+
+    if use_wandb and wandb is not None:
+        wandb.summary['avg_return'] = avg_return
+        wandb.finish()
+
+    return avg_return
+
+
 def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) -> None:
     if optuna is None:
         raise RuntimeError("Optuna is not installed. Please install optuna to use hyperparameter search.")
@@ -831,21 +1237,41 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Train navigation policy with PPO (agent-agnostic structure)')
+    parser = argparse.ArgumentParser(description='Train navigation policy with PPO or TD3')
+    
+    # Algorithm selection
+    parser.add_argument('--algo', type=str, default='td3', choices=['ppo', 'td3'],
+                        help='Algorithm to use: ppo or td3 (default: td3)')
+    
+    # Common parameters
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--max-steps', type=int, default=3000)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--lr-actor', type=float, default=None)
     parser.add_argument('--lr-critic', type=float, default=None)
-    parser.add_argument('--hidden', type=int, default=128)
+    parser.add_argument('--hidden', type=int, default=256, help='Hidden layer size (default: 256 for TD3)')
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--k-epochs', type=int, default=10)
-    parser.add_argument('--eps-clip', type=float, default=0.2)
-    parser.add_argument('--update-timestep', type=int, default=2000)
-    parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use-wandb', action='store_true')
     parser.add_argument('--wandb-project', type=str, default='PredictiveDWA')
+    
+    # PPO-specific parameters
+    parser.add_argument('--k-epochs', type=int, default=10, help='PPO: epochs per update')
+    parser.add_argument('--eps-clip', type=float, default=0.2, help='PPO: clip parameter')
+    parser.add_argument('--update-timestep', type=int, default=2000, help='PPO: steps between updates')
+    parser.add_argument('--action-select-interval', type=int, default=1, help='PPO: action selection interval')
+    
+    # TD3-specific parameters
+    parser.add_argument('--tau', type=float, default=0.005, help='TD3: soft update coefficient')
+    parser.add_argument('--policy-noise', type=float, default=0.2, help='TD3: target policy smoothing noise')
+    parser.add_argument('--noise-clip', type=float, default=0.5, help='TD3: noise clip range')
+    parser.add_argument('--policy-delay', type=int, default=2, help='TD3: delayed policy update frequency')
+    parser.add_argument('--buffer-size', type=int, default=100000, help='TD3: replay buffer size')
+    parser.add_argument('--batch-size', type=int, default=256, help='TD3: minibatch size')
+    parser.add_argument('--exploration-noise', type=float, default=0.1, help='TD3: exploration noise std')
+    parser.add_argument('--warmup-steps', type=int, default=1000, help='TD3: random action warmup steps')
+    parser.add_argument('--updates-per-step', type=int, default=1, help='TD3: gradient steps per env step')
+    
     # Optuna options
     parser.add_argument('--optuna-trials', type=int, default=0)
     parser.add_argument('--optuna-study', type=str, default='theta_qnet_study')
@@ -858,6 +1284,7 @@ def main():
     args = parse_args()
 
     base_config: Dict[str, Any] = {
+        'algorithm': args.algo,
         'episodes': args.episodes,
         'max_steps': args.max_steps,
         'learning_rate': args.lr,
@@ -865,12 +1292,23 @@ def main():
         'lr_critic': args.lr_critic if args.lr_critic is not None else args.lr,
         'hidden_size': args.hidden,
         'gamma': args.gamma,
+        'seed': args.seed,
+        'wandb_project': args.wandb_project,
+        # PPO-specific
         'k_epochs': args.k_epochs,
         'eps_clip': args.eps_clip,
         'update_timestep': args.update_timestep,
         'action_select_interval': args.action_select_interval,
-        'seed': args.seed,
-        'wandb_project': args.wandb_project,
+        # TD3-specific
+        'tau': args.tau,
+        'policy_noise': args.policy_noise,
+        'noise_clip': args.noise_clip,
+        'policy_delay': args.policy_delay,
+        'buffer_size': args.buffer_size,
+        'batch_size': args.batch_size,
+        'exploration_noise': args.exploration_noise,
+        'warmup_steps': args.warmup_steps,
+        'updates_per_step': args.updates_per_step,
         # Env defaults
         'dt': 1/60.0,
         'corridor_width': 4.0,
@@ -883,10 +1321,17 @@ def main():
         'wandb_during_optuna': args.wandb_during_optuna,
     }
 
+    print(f"\n{'='*60}")
+    print(f"Training with {args.algo.upper()}")
+    print(f"{'='*60}\n")
+
     if args.optuna_trials and args.optuna_trials > 0:
         run_optuna(args.optuna_study, args.optuna_trials, base_config)
     else:
-        train(base_config, use_wandb=args.use_wandb)
+        if args.algo == 'td3':
+            train_td3(base_config, use_wandb=args.use_wandb)
+        else:
+            train(base_config, use_wandb=args.use_wandb)
 
 
 if __name__ == '__main__':

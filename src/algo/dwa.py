@@ -66,6 +66,12 @@ class DWA:
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
+        
+        # Agent-controlled sample space modification
+        # This allows RL agent to directly control w_min, restricting the angular velocity sample space
+        # Key insight: This gives the agent VETO power over certain turning directions
+        # without modifying the score function
+        self.agent_w_min = None  # If set, overrides default w_min for sampling
 
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
@@ -150,18 +156,25 @@ class DWA:
         # Generate dynamic window
         dw = self.dynamic_window()
         
-        # Get door-aware sampling parameters
-        #w_min, w_max = self.get_door_aware_sampling_params()
-        #w_min, w_max = -math.pi / 2, math.pi / 2  # Capped to prevent extreme turning
-        w_min, w_max = -math.pi, math.pi
+        # Determine angular velocity sampling range
+        # Use agent-controlled w_min if set, otherwise use default
+        if self.agent_w_min is not None:
+            # Agent directly controls w_min - this restricts which angular velocities are sampled
+            # Higher w_min → fewer right-turn options (positive ω restricted)
+            # Lower w_min → more left-turn options allowed
+            w_min = self.agent_w_min
+        else:
+            w_min = self.w_min  # Default: -π
+        
+        w_max = self.w_max  # Keep w_max at default for now (agent controls only w_min)
         
         # Sample velocities and evaluate
         best_score = -float('inf')
         best_v, best_w = 0.0, 0.0
         self.trajectories = []  # Reset for visualization
         
-        # Sample velocities like in the reference implementation
-        # Create arrays of possible velocity changes (not absolute velocities)
+        # Sample velocities - agent_w_min directly affects which ω values are considered
+        # This is the KEY mechanism: agent restricts the sample space, DWA picks from what's allowed
         v_samples = np.linspace(max(dw[0], self.v_min), min(dw[1], self.v_max), num=self.v_samples)
         w_samples = np.linspace(max(dw[2], w_min), min(dw[3], w_max), num=self.w_samples)
         
