@@ -15,11 +15,19 @@ import torch.nn as nn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
 from agents.ppo import PPO
+from agents.td3 import TD3
 
 # Optional third-party integrations
 
-import wandb  
-import optuna  
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+try:
+    import optuna
+except ImportError:
+    optuna = None
 
 def get_curriculum_params(episode: int, total_episodes: int) -> dict:
     """
@@ -555,27 +563,60 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     _ = tmp_sim.step(dt)
     input_dim = int(len(extract_nav_features(tmp_sim)))
 
-    # Build agent (PPO with discrete action space)
+    # Build agent based on agent_type
     hidden_size = int(config.get('hidden_size', 128))
-    agent = PPO(
-        state_dim=input_dim,
-        action_dim=num_actions,
-        lr_actor=lr_actor,
-        lr_critic=lr_critic,
-        gamma=gamma,
-        K_epochs=k_epochs,
-        eps_clip=eps_clip,
-        has_continuous_action_space=True,
-        action_std_init=0.6,
-    )
+    agent_type = str(config.get('agent_type', 'ppo')).lower()
+    
+    if agent_type == 'ppo':
+        agent = PPO(
+            state_dim=input_dim,
+            action_dim=num_actions,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            gamma=gamma,
+            K_epochs=k_epochs,
+            eps_clip=eps_clip,
+            has_continuous_action_space=True,
+            action_std_init=0.6,
+        )
+    elif agent_type == 'td3':
+        # TD3-specific hyperparameters
+        tau = float(config.get('tau', 0.005))
+        policy_noise = float(config.get('policy_noise', 0.2))
+        noise_clip = float(config.get('noise_clip', 0.5))
+        policy_delay = int(config.get('policy_delay', 2))
+        buffer_size = int(config.get('buffer_size', 1_000_000))
+        batch_size = int(config.get('batch_size', 256))
+        
+        agent = TD3(
+            state_dim=input_dim,
+            action_dim=num_actions,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            gamma=gamma,
+            tau=tau,
+            policy_noise=policy_noise,
+            noise_clip=noise_clip,
+            policy_delay=policy_delay,
+            hidden_size=hidden_size,
+            buffer_size=buffer_size,
+            batch_size=batch_size,
+            action_std_init=0.1,  # Lower initial exploration noise for TD3
+        )
+    else:
+        raise ValueError(f"Unknown agent_type: {agent_type}. Supported: 'ppo', 'td3'")
 
     if use_wandb and wandb is not None:
         wandb.init(project=str(config.get('wandb_project', 'PredictiveDWA')),
                    name=run_name, config=config, allow_val_change=True)
-        # Watch PPO networks if available
+        # Watch networks based on agent type
         try:
-            wandb.watch(agent.policy.actor, log='all', log_freq=200)
-            wandb.watch(agent.policy.critic, log='all', log_freq=200)
+            if agent_type == 'ppo':
+                wandb.watch(agent.policy.actor, log='all', log_freq=200)
+                wandb.watch(agent.policy.critic, log='all', log_freq=200)
+            elif agent_type == 'td3':
+                wandb.watch(agent.actor, log='all', log_freq=200)
+                wandb.watch(agent.critic, log='all', log_freq=200)
         except Exception:
             pass
 
@@ -637,23 +678,31 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 prev_offset = float(offset_normalized[0])
                 prev_offset = max(-1.0, min(1.0, prev_offset))
             else:
-                # Reuse previous action but still log this step into PPO buffer
-                offset_normalized_value = prev_offset
-                # IMPORTANT: use policy_old for consistency with PPO's importance sampling
-                policy_device = next(agent.policy_old.parameters()).device
-                state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
-                state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
-                action_tensor_batch = torch.tensor([[offset_normalized_value]], dtype=torch.float32, device=policy_device)
-                with torch.no_grad():
-                    old_logprob, state_value, _ = agent.policy_old.evaluate(state_tensor_batch, action_tensor_batch)
-                # Match shapes used by select_action: state (no batch), action ([1, action_dim])
-                agent.buffer.states.append(state_tensor_no_batch)
-                agent.buffer.actions.append(action_tensor_batch)
-                agent.buffer.logprobs.append(old_logprob.detach())
-                agent.buffer.state_values.append(state_value.squeeze(0).detach())
+                # Reuse previous action
+                if agent_type == 'ppo':
+                    # PPO: log this step into PPO buffer with logprob/value
+                    offset_normalized_value = prev_offset
+                    # IMPORTANT: use policy_old for consistency with PPO's importance sampling
+                    policy_device = next(agent.policy_old.parameters()).device
+                    state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
+                    state_tensor_batch = state_tensor_no_batch.unsqueeze(0)
+                    action_tensor_batch = torch.tensor([[offset_normalized_value]], dtype=torch.float32, device=policy_device)
+                    with torch.no_grad():
+                        old_logprob, state_value, _ = agent.policy_old.evaluate(state_tensor_batch, action_tensor_batch)
+                    # Match shapes used by select_action: state (no batch), action ([1, action_dim])
+                    agent.buffer.states.append(state_tensor_no_batch)
+                    agent.buffer.actions.append(action_tensor_batch)
+                    agent.buffer.logprobs.append(old_logprob.detach())
+                    agent.buffer.state_values.append(state_value.squeeze(0).detach())
+                elif agent_type == 'td3':
+                    # TD3: just call select_action with the same state to record transition
+                    # The action will be the same due to deterministic policy + noise
+                    offset_normalized = agent.select_action(state_feat)
+                    prev_offset = float(offset_normalized[0])
+                    prev_offset = max(-1.0, min(1.0, prev_offset))
 
             # Scale offset from [-1, 1] to [-π/6, π/6] (±30 degrees)
-            max_offset = math.pi / 3  # 60 degrees
+            max_offset = math.pi / 2  # 90 degrees
             offset = prev_offset * max_offset
             
             # Set offset in the planner (agent's correction to path heading)
@@ -681,9 +730,18 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             agent.buffer.rewards.append(float(reward))
             agent.buffer.is_terminals.append(bool(done_flag))
 
-            # Trigger update at fixed timesteps
+            # Trigger updates based on agent type
             time_step += 1
-            if time_step % update_timestep == 0:
+            
+            # PPO: update every update_timestep steps (on-policy batch updates)
+            # TD3: update every step (off-policy with replay buffer)
+            should_update = False
+            if agent_type == 'ppo':
+                should_update = (time_step % update_timestep == 0)
+            elif agent_type == 'td3':
+                should_update = True  # Update every step for TD3
+            
+            if should_update:
                 update_stats = agent.update()
                 if update_stats is not None:
                     # Track losses for episode-level averaging
@@ -701,11 +759,34 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                             'train_step': time_step,
                         }, step=global_step)
 
-            if time_step % (10 * update_timestep) == 0:  # e.g. every 10 updates ####### ADD ACTION STD DECAY HERE #######
-                agent.decay_action_std(action_std_decay_rate=0.01, min_action_std=0.05)
+            # Decay action std / exploration noise
+            if agent_type == 'ppo':
+                if time_step % (10 * update_timestep) == 0:
+                    agent.decay_action_std(action_std_decay_rate=0.01, min_action_std=0.05)
+            elif agent_type == 'td3':
+                # TD3: decay exploration noise less frequently (every 5000 steps)
+                if time_step % 5000 == 0:
+                    agent.decay_action_std(action_std_decay_rate=0.005, min_action_std=0.01)
 
             global_step += 1
             if done_flag:
+                # Handle final transition for TD3
+                if agent_type == 'td3' and agent._prev_state is not None:
+                    # Complete the final transition with terminal state
+                    if len(agent.buffer.rewards) > 0:
+                        reward = agent.buffer.rewards[-1]
+                        agent.buffer.add(
+                            agent._prev_state,
+                            agent._prev_action,
+                            reward,
+                            state_feat,  # terminal state (doesn't matter much)
+                            True  # done
+                        )
+                        agent.buffer.rewards.pop()
+                        agent.buffer.is_terminals.pop()
+                    agent._prev_state = None
+                    agent._prev_action = None
+                
                 # Update at episode boundary as well
                 update_stats = agent.update()
                 if update_stats is not None:
@@ -724,6 +805,22 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                             'train_step': time_step,
                         }, step=global_step)
                 break
+        
+        # Handle TD3 pending transition if episode ended due to max_steps (not done_flag)
+        if agent_type == 'td3' and agent._prev_state is not None:
+            if len(agent.buffer.rewards) > 0:
+                reward = agent.buffer.rewards[-1]
+                agent.buffer.add(
+                    agent._prev_state,
+                    agent._prev_action,
+                    reward,
+                    state_feat,
+                    False  # Not a terminal state, just truncated
+                )
+                agent.buffer.rewards.pop()
+                agent.buffer.is_terminals.pop()
+            agent._prev_state = None
+            agent._prev_action = None
 
         # Episode metrics
         total_steps = t + 1
@@ -744,7 +841,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             'entropy': np.mean(episode_losses['entropy']) if episode_losses['entropy'] else 0.0,
         }
 
-        print(f"Episode {ep+1}/{episodes} | Return: {episode_return:.2f} | Steps: {total_steps}")
+        print(f"Episode {ep+1}/{episodes} [{agent_type.upper()}] | Return: {episode_return:.2f} | Steps: {total_steps}")
         print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
         print(f"  Rewards - Progress: {reward_components['progress']:.2f} | Overlap: {reward_components['overlap']:.2f} | Shaping: {reward_components['shaping']:.2f}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
@@ -784,10 +881,11 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
     avg_return = float(np.mean(returns)) if returns else 0.0
 
-    # Save policy
+    # Save policy with agent type in filename
     os.makedirs('checkpoints', exist_ok=True)
-    agent.save(os.path.join('checkpoints', 'theta_qnet.pt'))
-    print('Saved PPO policy to checkpoints/theta_qnet.pt')
+    checkpoint_filename = f'{agent_type}_policy.pt'
+    agent.save(os.path.join('checkpoints', checkpoint_filename))
+    print(f'Saved {agent_type.upper()} policy to checkpoints/{checkpoint_filename}')
 
     if use_wandb and wandb is not None:
         wandb.summary['avg_return'] = avg_return
@@ -831,7 +929,11 @@ def run_optuna(study_name: str, num_trials: int, base_config: Dict[str, Any]) ->
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Train navigation policy with PPO (agent-agnostic structure)')
+    parser = argparse.ArgumentParser(description='Train navigation policy with PPO or TD3')
+    # Agent selection
+    parser.add_argument('--agent-type', type=str, default='ppo', choices=['ppo', 'td3'],
+                        help='RL algorithm to use: ppo or td3 (default: ppo)')
+    # Common parameters
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--max-steps', type=int, default=3000)
     parser.add_argument('--lr', type=float, default=3e-4)
@@ -839,9 +941,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--lr-critic', type=float, default=None)
     parser.add_argument('--hidden', type=int, default=128)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--k-epochs', type=int, default=10)
-    parser.add_argument('--eps-clip', type=float, default=0.2)
-    parser.add_argument('--update-timestep', type=int, default=2000)
+    # PPO-specific parameters
+    parser.add_argument('--k-epochs', type=int, default=10, help='PPO: K epochs for policy update')
+    parser.add_argument('--eps-clip', type=float, default=0.2, help='PPO: clipping parameter')
+    parser.add_argument('--update-timestep', type=int, default=2000, help='PPO: update policy every N timesteps')
+    # TD3-specific parameters
+    parser.add_argument('--tau', type=float, default=0.005, help='TD3: soft update coefficient')
+    parser.add_argument('--policy-noise', type=float, default=0.2, help='TD3: noise added to target policy')
+    parser.add_argument('--noise-clip', type=float, default=0.5, help='TD3: range to clip target policy noise')
+    parser.add_argument('--policy-delay', type=int, default=2, help='TD3: frequency of delayed policy updates')
+    parser.add_argument('--buffer-size', type=int, default=1_000_000, help='TD3: replay buffer size')
+    parser.add_argument('--batch-size', type=int, default=256, help='TD3: batch size for updates')
+    # Common training parameters
     parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use-wandb', action='store_true')
@@ -858,6 +969,9 @@ def main():
     args = parse_args()
 
     base_config: Dict[str, Any] = {
+        # Agent selection
+        'agent_type': args.agent_type,
+        # Common parameters
         'episodes': args.episodes,
         'max_steps': args.max_steps,
         'learning_rate': args.lr,
@@ -865,12 +979,20 @@ def main():
         'lr_critic': args.lr_critic if args.lr_critic is not None else args.lr,
         'hidden_size': args.hidden,
         'gamma': args.gamma,
-        'k_epochs': args.k_epochs,
-        'eps_clip': args.eps_clip,
-        'update_timestep': args.update_timestep,
         'action_select_interval': args.action_select_interval,
         'seed': args.seed,
         'wandb_project': args.wandb_project,
+        # PPO-specific parameters
+        'k_epochs': args.k_epochs,
+        'eps_clip': args.eps_clip,
+        'update_timestep': args.update_timestep,
+        # TD3-specific parameters
+        'tau': args.tau,
+        'policy_noise': args.policy_noise,
+        'noise_clip': args.noise_clip,
+        'policy_delay': args.policy_delay,
+        'buffer_size': args.buffer_size,
+        'batch_size': args.batch_size,
         # Env defaults
         'dt': 1/60.0,
         'corridor_width': 4.0,
