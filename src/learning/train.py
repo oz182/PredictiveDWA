@@ -452,7 +452,7 @@ def compute_reward(sim, progress_prev_dist: float, w_max_ratio: float = 1.0,
     
     if overlap_type == 'none':
         # Negative reward for staying in free space
-        overlap_reward = -0.01
+        overlap_reward = -0.5
     elif overlap_type == 'person':
         # Penalty for being in person's proxemic zone
         overlap_reward = -1.5
@@ -461,7 +461,7 @@ def compute_reward(sim, progress_prev_dist: float, w_max_ratio: float = 1.0,
         overlap_reward = -2.0
     elif overlap_type == 'both':
         # Larger penalty for being in both zones
-        overlap_reward = -3.0
+        overlap_reward = -3.5
     else:
         overlap_reward = 0.0
     
