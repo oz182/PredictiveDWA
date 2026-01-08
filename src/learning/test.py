@@ -146,7 +146,7 @@ def set_seed(episode_id: int, base_seed: int = None) -> int:
     return seed
 
 
-def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action_select_interval=1, save_csv=False, seed=None):
+def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action_select_interval=12, save_csv=False, seed=None):
     # Set initial seed for model loading
     initial_seed = set_seed(0, seed)
     
