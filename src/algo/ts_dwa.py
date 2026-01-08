@@ -712,11 +712,12 @@ class TSDWA:
                 # Add zero‑omega version (straight motion) for exit corridors
                 #samples.append((v_trans, 0.0))
 
-        # Escape manoeuvres (left/right/back) -----------------------------
-        for omega_bias in (-self.max_rotation * 0.5, self.max_rotation * 0.5):
-            #samples.append((self.max_speed * 0.3, omega_bias))
-            pass
-        #samples.append((self.max_speed * 0.2, 0.0))  # reverse‑like slow move
+#        # Escape manoeuvres (left/right/back) -----------------------------
+#        for omega_bias in (-self.max_rotation * 0.5, self.max_rotation * 0.5):
+#            #samples.append((self.max_speed * 0.3, omega_bias))
+#            pass
+#        #samples.append((self.max_speed * 0.2, 0.0))  # reverse‑like slow move
+
         return samples
 
     # -------  Legacy helpers copied verbatim from original planner  -----
