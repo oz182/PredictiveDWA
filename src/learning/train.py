@@ -418,7 +418,7 @@ def compute_min_obstacle_distance(sim) -> tuple[float, float]:
     return min_person_dist, min_door_dist
 
 
-def compute_reward(sim, progress_prev_dist: float, w_max_ratio: float = 1.0, 
+def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0, 
                    prev_collision_count: int = 0) -> tuple[float, float, int, dict]:
     """
     Reward function with proper credit assignment for obstacle avoidance.
@@ -512,7 +512,7 @@ def compute_reward(sim, progress_prev_dist: float, w_max_ratio: float = 1.0,
         'door_overlap': overlap_info['door_overlap'],
         'min_person_dist': min_person_dist if min_person_dist != float('inf') else -1.0,
         'min_door_dist': min_door_dist if min_door_dist != float('inf') else -1.0,
-        'w_max_ratio': w_max_ratio,
+        'action_value': action_value,
         'progress_reward': progress_reward,
         'overlap_reward': overlap_reward,
         'shaping_reward': shaping_reward,
@@ -529,7 +529,16 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Action space: single offset value for heading adjustment
+    # ==========================================================================
+    # CONTROL MODE SELECTION
+    # ==========================================================================
+    # 'offset' - Agent outputs heading offset for TS-DWA (theta_ph adjustment)
+    # 'w_max'  - Agent outputs w_max ratio for DWA (angular velocity sampling limit)
+    control_mode = str(config.get('control_mode', 'offset'))  # Default to offset for TS-DWA
+    print(f"Control Mode: {control_mode.upper()}")
+    # ==========================================================================
+
+    # Action space: single value for heading adjustment or w_max control
     num_actions = 1
 
     # Environment / training hyperparameters (algorithm-agnostic where possible)
@@ -657,30 +666,30 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
 
         episode_return = 0.0
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
-        w_max_history = []  # Track w_max values for analysis
+        action_history = []  # Track action values for analysis (offset or w_max depending on mode)
         reward_components = {'progress': 0.0, 'overlap': 0.0, 'shaping': 0.0}  # Track reward breakdown
         
         # Loss tracking for this episode
         episode_losses = {'total': [], 'policy': [], 'value': [], 'entropy': []}
 
         # Storage for action repetition
-        prev_w_max_action = None  # Agent's w_max control action
+        prev_action = None  # Agent's action (offset or w_max depending on mode)
 
         for t in range(max_steps):
             # Build state features
             state_feat = extract_nav_features(sim)
 
             # Decide whether to sample a new action or reuse previous one
-            if (t % action_select_interval == 0) or (prev_w_max_action is None):
+            if (t % action_select_interval == 0) or (prev_action is None):
                 # Sample new action via policy (also records state/action/logprob/value in buffer)
                 action_normalized = agent.select_action(state_feat)  # Returns array in [-1, 1]
-                prev_w_max_action = float(action_normalized[0])
-                prev_w_max_action = max(-1.0, min(1.0, prev_w_max_action))
+                prev_action = float(action_normalized[0])
+                prev_action = max(-1.0, min(1.0, prev_action))
             else:
                 # Reuse previous action
                 if agent_type == 'ppo':
                     # PPO: log this step into PPO buffer with logprob/value
-                    action_value = prev_w_max_action
+                    action_value = prev_action
                     # IMPORTANT: use policy_old for consistency with PPO's importance sampling
                     policy_device = next(agent.policy_old.parameters()).device
                     state_tensor_no_batch = torch.FloatTensor(state_feat).to(policy_device)
@@ -696,23 +705,32 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 elif agent_type == 'td3':
                     # TD3: just call select_action with the same state to record transition
                     action_normalized = agent.select_action(state_feat)
-                    prev_w_max_action = float(action_normalized[0])
-                    prev_w_max_action = max(-1.0, min(1.0, prev_w_max_action))
+                    prev_action = float(action_normalized[0])
+                    prev_action = max(-1.0, min(1.0, prev_action))
 
-            # Scale action from [-1, 1] to w_max ratio [0, 1]
-            # -1 means minimum w_max (restricted turning), +1 means full w_max (unrestricted)
-            w_max_ratio = (prev_w_max_action + 1.0) / 2.0  # Map [-1, 1] to [0, 1]
-            
-            # Set w_max in the DWA planner (agent's control over angular velocity sampling)
-            sim.robot.nav.agent_w_max = w_max_ratio
-            w_max_history.append(w_max_ratio)
+            # Apply action based on control mode
+            if control_mode == 'offset':
+                # OFFSET MODE: Agent outputs heading offset for TS-DWA
+                # Scale from [-1, 1] to [-max_offset, max_offset]
+                max_offset = math.pi / 2  # ±90 degrees
+                offset = prev_action * max_offset
+                sim.robot.nav.agent_offset = offset
+                action_history.append(abs(offset))
+                action_value_for_reward = offset
+            else:  # control_mode == 'w_max'
+                # W_MAX MODE: Agent outputs w_max ratio for DWA
+                # Scale from [-1, 1] to [0, 1]
+                w_max_ratio = (prev_action + 1.0) / 2.0
+                sim.robot.nav.agent_w_max = w_max_ratio
+                action_history.append(w_max_ratio)
+                action_value_for_reward = w_max_ratio
 
             # Step simulation
             _, _, done_flag = sim.step(dt)
 
             # Reward with all components
             reward, prev_dist, prev_collision_count, info = compute_reward(
-                sim, prev_dist, w_max_ratio, prev_collision_count
+                sim, prev_dist, action_value_for_reward, prev_collision_count
             )
             episode_return += reward
 
@@ -825,10 +843,19 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         overlap_pct = {k: 100 * v / total_steps for k, v in overlap_counts.items()}
         returns.append(episode_return)
         
-        # w_max statistics
-        avg_w_max = np.mean(w_max_history) if w_max_history else 1.0
-        min_w_max = np.min(w_max_history) if w_max_history else 1.0
-        max_w_max = np.max(w_max_history) if w_max_history else 1.0
+        # Action statistics (different interpretation based on control mode)
+        if control_mode == 'offset':
+            # Offset mode: track absolute offset values (in radians)
+            avg_action = np.mean(action_history) if action_history else 0.0
+            min_action = np.min(action_history) if action_history else 0.0
+            max_action = np.max(action_history) if action_history else 0.0
+            # Convert to degrees for display
+            avg_action_deg = avg_action * 180 / math.pi
+            max_action_deg = max_action * 180 / math.pi
+        else:  # w_max mode
+            avg_action = np.mean(action_history) if action_history else 1.0
+            min_action = np.min(action_history) if action_history else 1.0
+            max_action = np.max(action_history) if action_history else 1.0
 
         # Calculate episode-level average losses
         avg_episode_losses = {
@@ -842,7 +869,10 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
         print(f"  Rewards - Progress: {reward_components['progress']:.2f} | Overlap: {reward_components['overlap']:.2f} | Shaping: {reward_components['shaping']:.2f}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
-        print(f"  w_max Control - Avg: {avg_w_max:.2f} | Min: {min_w_max:.2f} | Max: {max_w_max:.2f} | (range: 0-1)")
+        if control_mode == 'offset':
+            print(f"  Offset Control - Avg: {avg_action_deg:.1f}° | Max: {max_action_deg:.1f}° | (range: ±90°)")
+        else:
+            print(f"  w_max Control - Avg: {avg_action:.2f} | Min: {min_action:.2f} | Max: {max_action:.2f} | (range: 0-1)")
         if episode_losses['total']:
             print(f"  Losses - Total: {avg_episode_losses['total']:.4f} | Policy: {avg_episode_losses['policy']:.4f} | Value: {avg_episode_losses['value']:.4f} | Entropy: {avg_episode_losses['entropy']:.4f}")
 
@@ -860,10 +890,11 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'overlap_person_pct': overlap_pct['person'],
                 'overlap_door_pct': overlap_pct['door'],
                 'overlap_both_pct': overlap_pct['both'],
-                # w_max control statistics
-                'avg_w_max': avg_w_max,
-                'min_w_max': min_w_max,
-                'max_w_max': max_w_max,
+                # Action statistics (mode-dependent)
+                'avg_action': avg_action,
+                'min_action': min_action,
+                'max_action': max_action,
+                'control_mode': control_mode,
                 'elapsed_min': (time.time() - start_time) / 60.0,
                 # Curriculum parameters
                 'curriculum_stage': curriculum['stage'],
@@ -931,6 +962,9 @@ def parse_args() -> argparse.Namespace:
     # Agent selection
     parser.add_argument('--agent-type', type=str, default='ppo', choices=['ppo', 'td3'],
                         help='RL algorithm to use: ppo or td3 (default: ppo)')
+    # Control mode selection
+    parser.add_argument('--control-mode', type=str, default='offset', choices=['offset', 'w_max'],
+                        help='Control mode: offset (heading adjustment for TS-DWA) or w_max (angular velocity limit for DWA)')
     # Common parameters
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--max-steps', type=int, default=3000)
@@ -967,8 +1001,9 @@ def main():
     args = parse_args()
 
     base_config: Dict[str, Any] = {
-        # Agent selection
+        # Agent and control mode selection
         'agent_type': args.agent_type,
+        'control_mode': args.control_mode,
         # Common parameters
         'episodes': args.episodes,
         'max_steps': args.max_steps,
