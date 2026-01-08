@@ -146,7 +146,7 @@ def set_seed(episode_id: int, base_seed: int = None) -> int:
     return seed
 
 
-def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action_select_interval=1, save_csv=False, seed=None):
+def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action_select_interval=1, save_csv=False, seed=None):
     # Set initial seed for model loading
     initial_seed = set_seed(0, seed)
     
@@ -170,7 +170,7 @@ def main(render=True, model_path='checkpoints/theta_qnet.pt', episodes=3, action
         episode_seed = set_seed(ep, seed)
         print(f"\nStarting episode {ep+1}/{episodes} (seed={episode_seed})")
         
-        sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
+        sim = Simulation(corridor_width=4.0, door_side='right', num_people=6,
                          people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)])
         # Warm-up step to init internal state
         _, _, _ = sim.step(1/60.0)

@@ -66,6 +66,11 @@ class DWA:
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
+        
+        # Agent-controlled w_max (for RL training)
+        # When set, this overrides the default w_max sampling range
+        # Value should be in [0, 1] where 1 = full range (w_max = pi), 0 = no turning allowed
+        self.agent_w_max = None  # None means use default behavior
 
     def set_goal(self, goal: Tuple[float, float]):
         self.goal = np.array(goal)
@@ -150,10 +155,19 @@ class DWA:
         # Generate dynamic window
         dw = self.dynamic_window()
         
-        # Get door-aware sampling parameters
-        #w_min, w_max = self.get_door_aware_sampling_params()
-        #w_min, w_max = -math.pi / 2, math.pi / 2  # Capped to prevent extreme turning
-        w_min, w_max = -math.pi, math.pi
+        # Get angular velocity sampling limits
+        # If agent_w_max is set (RL control), use it to scale w_max
+        # Otherwise use default full range
+        if self.agent_w_max is not None:
+            # agent_w_max is in [0, 1], scale to actual w_max
+            # 1.0 = full range (pi), 0.0 = no turning (but keep small minimum for stability)
+            min_w_max = 0.1  # Minimum w_max to prevent getting stuck
+            scaled_w_max = min_w_max + self.agent_w_max * (math.pi - min_w_max)
+            w_min, w_max = -scaled_w_max, scaled_w_max
+        else:
+            # Default: use door-aware sampling or full range
+            #w_min, w_max = self.get_door_aware_sampling_params()
+            w_min, w_max = -math.pi, math.pi
         
         # Sample velocities and evaluate
         best_score = -float('inf')
