@@ -456,6 +456,15 @@ class Robot:
             ]) * self.radius * 1.5) * scale + offset
             pygame.draw.line(screen, (0, 255, 0), pos, end_pos.astype(int), 2)
             
+            # Draw agent offset direction (orange arrow)
+            if hasattr(self.nav, 'agent_offset') and self.nav.agent_offset != 0:
+                offset_angle = self.nav.orientation + self.nav.agent_offset
+                offset_end = (self.position + np.array([
+                    math.cos(offset_angle),
+                    math.sin(offset_angle)
+                ]) * self.radius * 5.0) * scale + offset
+                pygame.draw.line(screen, (255, 100, 0), pos, offset_end.astype(int), 2)
+            
             # Draw global path as green line
             if self.global_path is not None and len(self.global_path) > 1:
                 global_path_points = [(p * scale + offset).astype(int) for p in self.global_path]
