@@ -58,7 +58,7 @@ class TSDWA:
         n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
         theta_range: float = math.pi/6,  # θ_range   (±30° cone)
         alpha_ph: float = 1.0,          # α_ph heading‑bias gain
-        n_skip: int = 4,                # spacing between curvature calculation points
+        n_skip: int = 1,                # spacing between curvature calculation points
         sampling_strategy: str = "uniform",  # Strategy: "uniform", "power", "gaussian", "beta"
         left_weight: float = 2,       # Sampling density weight for left side
         right_weight: float = 10,      # Sampling density weight for right side
@@ -695,6 +695,22 @@ class TSDWA:
         )
         
         speeds = np.linspace(self.max_speed * 0.1, self.max_speed, self.n_speed)
+        
+        # ----------------------------------------------------------------
+        # FIX: Shift the omega clipping window to center on theta_ph
+        # ----------------------------------------------------------------
+        # Compute omega that corresponds to theta_ph at reference velocity
+        v_ref = (speeds[0] + speeds[-1]) / 2  # midpoint of speed range
+        omega_target = v_ref * (kappa + self.alpha_ph * theta_ph)
+        
+        # Shift the DW window to center on omega_target (preserve width)
+        dw_half_width = (w_max - w_min) / 2
+        w_min_shifted = omega_target - dw_half_width
+        w_max_shifted = omega_target + dw_half_width
+        
+        # Clip to absolute rotation limits
+        w_min_shifted = max(-self.max_rotation, w_min_shifted)
+        w_max_shifted = min(self.max_rotation, w_max_shifted)
 
         samples: list[tuple[float, float]] = []
         for h in headings:
@@ -706,17 +722,11 @@ class TSDWA:
                 v_trans = np.clip(v_trans, v_min, v_max)
                 # Angular velocity coupling (Eq. 7 in paper)
                 omega = v_trans * (kappa + self.alpha_ph * h)
-                omega = np.clip(omega, w_min, w_max)
+                omega = np.clip(omega, w_min_shifted, w_max_shifted)
                 samples.append((v_trans, omega))
 
                 # Add zero‑omega version (straight motion) for exit corridors
                 #samples.append((v_trans, 0.0))
-
-#        # Escape manoeuvres (left/right/back) -----------------------------
-#        for omega_bias in (-self.max_rotation * 0.5, self.max_rotation * 0.5):
-#            #samples.append((self.max_speed * 0.3, omega_bias))
-#            pass
-#        #samples.append((self.max_speed * 0.2, 0.0))  # reverse‑like slow move
 
         return samples
 
