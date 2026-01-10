@@ -105,7 +105,7 @@ class TSDWA:
         self.w = 0.0
 
         # Re‑use original scoring weights for now; user may tune externally
-        self.weights = {"heading": 0.3, "goal": 0.1, "clearance": 0.4, "velocity": 0.2}
+        self.weights = {"heading": 0.05, "goal": 0.05, "clearance": 0.8, "velocity": 0.1}
 
         # Wall checking parameters
         self.wall_check_points = 6  # Default value, will be updated dynamically
