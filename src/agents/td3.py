@@ -330,15 +330,29 @@ class TD3:
         checkpoint = torch.load(checkpoint_path, map_location=device)
         
         # Handle both old format (just actor state dict) and new format (full checkpoint)
-        if 'actor' in checkpoint:
+        if 'actor' in checkpoint and isinstance(checkpoint['actor'], dict):
+            # New format: {'actor': state_dict, 'actor_target': state_dict, ...}
             self.actor.load_state_dict(checkpoint['actor'])
             self.actor_target.load_state_dict(checkpoint['actor_target'])
             self.critic.load_state_dict(checkpoint['critic'])
             self.critic_target.load_state_dict(checkpoint['critic_target'])
         else:
-            # Assume it's just the actor state dict (for compatibility)
-            self.actor.load_state_dict(checkpoint)
-            self.actor_target.load_state_dict(checkpoint)
+            # Legacy format: direct state dict with 'actor.*' or 'net.*' keys
+            # Check if we need to remap 'actor.*' keys to 'net.*' keys
+            first_key = next(iter(checkpoint.keys()), '')
+            if first_key.startswith('actor.'):
+                # Remap 'actor.*' -> 'net.*' for actor, ignore 'critic.*' keys
+                actor_state = {}
+                for k, v in checkpoint.items():
+                    if k.startswith('actor.'):
+                        new_key = 'net.' + k[len('actor.'):]
+                        actor_state[new_key] = v
+                self.actor.load_state_dict(actor_state)
+                self.actor_target.load_state_dict(actor_state)
+            else:
+                # Assume it's already in 'net.*' format
+                self.actor.load_state_dict(checkpoint)
+                self.actor_target.load_state_dict(checkpoint)
     
     # Compatibility properties for train.py that accesses agent.policy_old
     @property

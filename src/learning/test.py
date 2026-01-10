@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sim.sim import Simulation
-from agents.ppo import PPO
+from agents.td3 import TD3
 from learning.train import extract_nav_features
 
 
@@ -79,25 +79,61 @@ def save_episode_csv(sim, episode_id: int, offset_history: list):
 
 
 def load_model(model_path, device='cpu'):
-    # Infer input dimension using a temporary simulation and shared extractor
-    tmp_sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
-                         people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)])
-    _ = tmp_sim.step(1/60.0)
-    input_dim = int(len(extract_nav_features(tmp_sim)))
+    """
+    Load a TD3 model from checkpoint, inferring architecture from saved weights.
+    
+    Handles multiple checkpoint formats:
+    - New format: {'actor': state_dict, 'actor_target': ..., 'critic': ..., 'critic_target': ...}
+    - Legacy format: direct state dict with 'actor.*' or 'net.*' keys
+    """
+    # Load checkpoint to infer dimensions
+    checkpoint = torch.load(model_path, map_location=device)
+    
+    # Determine state_dim and hidden_size from checkpoint weights
+    if 'actor' in checkpoint and isinstance(checkpoint['actor'], dict):
+        # New format: nested dict
+        first_layer_key = 'net.0.weight'
+        if first_layer_key in checkpoint['actor']:
+            weight_shape = checkpoint['actor'][first_layer_key].shape
+            hidden_size = weight_shape[0]
+            state_dim = weight_shape[1]
+        else:
+            raise ValueError(f"Cannot infer dimensions: missing {first_layer_key} in checkpoint['actor']")
+    else:
+        # Legacy format: direct state dict with 'actor.*' or 'net.*' keys
+        first_key = next(iter(checkpoint.keys()), '')
+        if first_key.startswith('actor.'):
+            # Legacy 'actor.*' format - need to remap to 'net.*'
+            weight_key = 'actor.0.weight'
+        elif first_key.startswith('net.'):
+            weight_key = 'net.0.weight'
+        else:
+            raise ValueError(f"Unknown checkpoint format: first key is '{first_key}'")
+        
+        if weight_key in checkpoint:
+            weight_shape = checkpoint[weight_key].shape
+            hidden_size = weight_shape[0]
+            state_dim = weight_shape[1]
+        else:
+            raise ValueError(f"Cannot infer dimensions: missing {weight_key} in checkpoint")
+    
+    print(f"Inferred from checkpoint: state_dim={state_dim}, hidden_size={hidden_size}")
 
     num_actions = 1  # Single offset value (must match training script)
 
-    # Instantiate PPO agent (continuous actions) and load checkpoint
-    agent = PPO(
-        state_dim=input_dim,
+    # Instantiate TD3 agent with matching architecture
+    agent = TD3(
+        state_dim=state_dim,
         action_dim=num_actions,
         lr_actor=1e-3,
         lr_critic=1e-3,
         gamma=0.99,
-        K_epochs=10,
-        eps_clip=0.2,
-        has_continuous_action_space=True,
-        action_std_init=0.4,
+        tau=0.005,
+        policy_noise=0.2,
+        noise_clip=0.5,
+        policy_delay=2,
+        max_action=1.0,
+        hidden_size=hidden_size,
     )
     agent.load(model_path)
     return agent
@@ -146,7 +182,7 @@ def set_seed(episode_id: int, base_seed: int = None) -> int:
     return seed
 
 
-def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action_select_interval=12, save_csv=False, seed=None):
+def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action_select_interval=3, save_csv=False, seed=None):
     # Set initial seed for model loading
     initial_seed = set_seed(0, seed)
     
@@ -170,7 +206,7 @@ def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action
         episode_seed = set_seed(ep, seed)
         print(f"\nStarting episode {ep+1}/{episodes} (seed={episode_seed})")
         
-        sim = Simulation(corridor_width=4.0, door_side='right', num_people=6,
+        sim = Simulation(corridor_width=4.0, door_side='right', num_people=3,
                          people_speeds=[random.uniform(0.6, 1.2) for _ in range(10)])
         # Warm-up step to init internal state
         _, _, _ = sim.step(1/60.0)
@@ -193,7 +229,7 @@ def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action
             feat = extract_nav_features(sim)
             # Select new action every N steps, otherwise reuse previous one
             if (t % action_select_interval == 0) or (prev_offset is None):
-                offset_normalized = agent.select_action(feat)  # Returns array
+                offset_normalized = agent.select_action(feat, add_noise=False)  # No exploration noise during eval
                 prev_offset = float(offset_normalized[0])
             
             # Scale offset from [-1, 1] to [-π/6, π/6] (±30 degrees)
