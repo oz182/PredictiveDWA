@@ -12,7 +12,7 @@ from sim.robot import Robot
 
 
 class Simulation:
-    def __init__(self, corridor_width: float = 5.0, door_side: str = None, 
+    def __init__(self, corridor_width: float = 4.0, door_side: str = None, 
                  num_people: int = 5, people_speeds: List[float] = None,
                  door_halo_radius: float = None, door_position_x: float = None):
         """
@@ -31,11 +31,11 @@ class Simulation:
         self.people_speeds = people_speeds if people_speeds else [random.uniform(0.6, 1.2) for _ in range(num_people)]
         
         # Corridor dimensions
-        self.corridor_length = 20.0
+        self.corridor_length = 14.0
         
         # Randomize door position if not specified (between 20% and 70% of corridor length)
         if door_position_x is None:
-            self.door_position = random.uniform(0.25 * self.corridor_length, 0.65 * self.corridor_length)
+            self.door_position = random.uniform(0.30 * self.corridor_length, 0.65 * self.corridor_length)
         else:
             self.door_position = door_position_x
             
