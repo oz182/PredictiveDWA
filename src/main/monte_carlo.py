@@ -5,14 +5,14 @@ Runs multiple simulations without GUI/display and records data for analysis
 
 Supports two modes:
   - default: Standard simulation using robot.py's configured navigator
-  - learned: Uses trained PPO model to control heading offset (like test.py)
+  - learned: Uses trained TD3 model to control heading offset (like test.py)
 
 Usage:
   # Run with default navigator (configured in robot.py)
   python monte_carlo.py --runs 10 --mode default
 
   # Run with learned model
-  python monte_carlo.py --runs 10 --mode learned --model checkpoints/theta_qnet.pt
+  python monte_carlo.py --runs 10 --mode learned --model checkpoints/td3_policy_WorkingOffset2.pt
 
   # Run learned model with custom action interval
   python monte_carlo.py --runs 10 --mode learned --action-select-interval 5
@@ -57,8 +57,8 @@ class MonteCarloRunner:
             num_people: Number of people in each simulation
             people_speed_range: Tuple of (min_speed, max_speed) for people
             max_simulation_time: Maximum time per simulation (seconds)
-            mode: "default" for standard simulation, "learned" for PPO model
-            model_path: Path to trained PPO model (required if mode="learned")
+            mode: "default" for standard simulation, "learned" for TD3 model
+            model_path: Path to trained TD3 model (required if mode="learned")
             action_select_interval: How often to select new action in learned mode
             render: Whether to render the simulation (slower but visual)
             seed: Base random seed for reproducibility. Each run uses seed + run_id.
@@ -88,14 +88,14 @@ class MonteCarloRunner:
             self._load_learned_model()
         
     def _load_learned_model(self):
-        """Load the trained PPO model for learned mode."""
-        from agents.ppo import PPO
+        """Load the trained TD3 model for learned mode."""
+        from agents.td3 import TD3
         from learning.train import extract_nav_features
         
         if self.model_path is None:
             # Default path
             self.model_path = os.path.join(
-                os.path.dirname(__file__), '..', 'learning', 'checkpoints', 'theta_qnet.pt'
+                os.path.dirname(__file__), '..', 'learning', 'checkpoints', 'td3_policy_WorkingOffset2.pt'
             )
         
         print(f"Loading learned model from: {self.model_path}")
@@ -110,17 +110,19 @@ class MonteCarloRunner:
         _ = tmp_sim.step(1/60.0)
         input_dim = int(len(extract_nav_features(tmp_sim)))
         
-        # Instantiate PPO agent and load checkpoint
-        self.agent = PPO(
+        # Instantiate TD3 agent and load checkpoint
+        self.agent = TD3(
             state_dim=input_dim,
             action_dim=1,  # Single offset value
             lr_actor=1e-3,
             lr_critic=1e-3,
             gamma=0.99,
-            K_epochs=10,
-            eps_clip=0.2,
-            has_continuous_action_space=True,
-            action_std_init=0.4,
+            tau=0.005,
+            policy_noise=0.2,
+            noise_clip=0.5,
+            policy_delay=2,
+            max_action=1.0,
+            hidden_size=128,
         )
         self.agent.load(self.model_path)
         self.extract_nav_features = extract_nav_features
@@ -208,9 +210,9 @@ class MonteCarloRunner:
             if self.mode == "learned" and self.agent is not None:
                 feat = self.extract_nav_features(sim)
                 
-                # Select new action based on interval
+                # Select new action based on interval (no exploration noise during evaluation)
                 if (step_count % self.action_select_interval == 0) or (prev_offset is None):
-                    offset_normalized = self.agent.select_action(feat)
+                    offset_normalized = self.agent.select_action(feat, add_noise=False)
                     prev_offset = float(offset_normalized[0])
                 
                 # Scale offset from [-1, 1] to [-π/6, π/6] (±30 degrees)
@@ -587,7 +589,7 @@ def main():
         epilog="""
 Modes:
   default  - Uses standard simulation with navigator configured in robot.py
-  learned  - Uses trained PPO model to control heading offset
+  learned  - Uses trained TD3 model to control heading offset
 
 Examples:
   # Run with default navigator
@@ -617,7 +619,7 @@ Examples:
     
     # Learned mode arguments
     parser.add_argument('--model', type=str, default=None,
-                        help='Path to trained model (for learned mode, default: checkpoints/theta_qnet.pt)')
+                        help='Path to trained model (for learned mode, default: checkpoints/td3_policy_WorkingOffset2.pt)')
     parser.add_argument('--action-select-interval', type=int, default=1,
                         help='Select a new action every N steps in learned mode (default: 1)')
     
