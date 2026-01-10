@@ -51,8 +51,8 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
     # Calculate progress (0.0 to 1.0)
     progress = episode / max(total_episodes, 1)
     
-    # Stage 1: Easy (first 40% of training)
-    if progress < 0.4:
+    # Stage 1: Easy (first 65% of training)
+    if progress < 0.85:
         return {
             'door_halo_radius_range': (1.6, 2.0),  # Narrow range around known value
             'door_position_x_range': (7.0, 9.0),   # Fixed around 40% of 20m corridor
@@ -61,19 +61,19 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
         }
     
     # Stage 2: Medium (40% - 60% of training)
-    elif progress < 0.6:
+    elif progress < 1.1:
         return {
-            'door_halo_radius_range': (1.2, 2.3),  # Expanded range
+            'door_halo_radius_range': (1.5, 2.3),  # Expanded range
             'door_position_x_range': (6.0, 11.0),  # More variation in position
             'randomize_door_side': False,          # Still on right side
             'stage': 'medium'
         }
     
     # Stage 3: Hard (60% - 80% of training)
-    elif progress < 0.8:
+    elif progress < 1.1:
         return {
-            'door_halo_radius_range': (0.8, 2.5),  # Full range
-            'door_position_x_range': (5.0, 13.0),  # Wide variation
+            'door_halo_radius_range': (1.3, 2.5),  # Full range
+            'door_position_x_range': (6.0, 11.0),  # Wide variation
             'randomize_door_side': False,           # Randomize left/right
             'stage': 'hard'
         }
@@ -423,11 +423,18 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     """
     Reward function with proper credit assignment for obstacle avoidance.
     
+    DESIGN PRINCIPLES:
+    1. Zero-centered for neutral states: Free space should NOT be penalized
+    2. Sparse terminal rewards dominate: Goal/failure rewards should be large
+    3. Dense shaping rewards are small: Guide behavior without drowning signal
+    4. Properly scaled: Progress should be meaningful relative to penalties
+    
     Components:
-    1. Progress reward: Encourage moving toward goal
-    2. Obstacle avoidance: Positive reward for staying clear, penalty for overlap
-    3. Distance-based shaping: Continuous signal as robot approaches obstacles
-    4. Collision penalty: Large penalty for actual collisions
+    1. Progress reward: Encourage moving toward goal (dense, positive)
+    2. Obstacle overlap: Penalty ONLY for violations (dense, negative)
+    3. Proximity shaping: Small continuous signal near obstacles (dense, negative)
+    4. Collision penalty: Large penalty for physical collisions (sparse, negative)
+    5. Goal bonus: Large reward for task completion (sparse, positive)
     
     Returns (reward, new_distance, new_collision_count, info)
     """
@@ -440,52 +447,69 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     # ==========================================================================
     # 1. PROGRESS REWARD - Encourage moving toward goal
     # ==========================================================================
+    # At 60 Hz with ~0.5 m/s speed, typical progress per step is ~0.008m
+    # Over 1000 steps traveling 8m toward goal: 8 * 20 = 160 reward
     progress = progress_prev_dist - dist  # Positive if moving toward goal
-    progress_reward = progress * 10.0  # Scale factor for progress
+    progress_reward = progress * 20.0  # Increased from 10.0 for better signal
     reward += progress_reward
     
     # ==========================================================================
-    # 2. OBSTACLE OVERLAP REWARD - Primary avoidance signal
+    # 2. OBSTACLE OVERLAP PENALTY - Only penalize violations, NOT free space
     # ==========================================================================
+    # KEY INSIGHT: Free space should be NEUTRAL (0.0), not negative.
+    # Penalizing existence creates a negative baseline that drowns out progress.
     overlap_info = check_robot_overlap(sim)
     overlap_type = overlap_info['overlap_type']
     
     if overlap_type == 'none':
-        # Negative reward for staying in free space
-        overlap_reward = -0.5
+        # NEUTRAL - no penalty for being in free space!
+        # This is critical: the robot shouldn't be punished for existing
+        overlap_reward = 0.0
     elif overlap_type == 'person':
-        # Penalty for being in person's proxemic zone
-        overlap_reward = -1.5
+        # Penalty for violating person's proxemic zone (social cost)
+        overlap_reward = -0.8
     elif overlap_type == 'door':
-        # Penalty for being in door's inflation zone
-        overlap_reward = -2.0
+        # Penalty for blocking door area (navigation cost)
+        overlap_reward = -1.5
     elif overlap_type == 'both':
-        # Larger penalty for being in both zones
-        overlap_reward = -3.5
+        # Combined penalty for both violations
+        overlap_reward = -2.5
     else:
         overlap_reward = 0.0
     
     reward += overlap_reward
     
     # ==========================================================================
-    # 3. DISTANCE-BASED SHAPING - Continuous signal before overlap occurs
+    # 2b. SMALL TIME PENALTY - Encourage efficiency without drowning signal
     # ==========================================================================
+    # Small per-step cost to encourage faster completion.
+    # At 1800 steps: 1800 * 0.02 = 36 total, much smaller than progress (~160)
+    # At 1000 steps: 1000 * 0.02 = 20 total
+    # Difference: 16 points saved by being 800 steps faster
+    time_penalty = -0.02
+    reward += time_penalty
+    
+    # ==========================================================================
+    # 3. PROXIMITY SHAPING - Small continuous signal near obstacles
+    # ==========================================================================
+    # Helps agent learn to keep distance BEFORE entering violation zones
+    # Kept small to not overwhelm progress signal
     min_person_dist, min_door_dist = compute_min_obstacle_distance(sim)
     
-    # Shaping zone: give continuous reward based on proximity to obstacles
-    # This helps the agent learn to keep distance BEFORE entering overlap zone
-    shaping_threshold = 2.0  # Start shaping within 2m of obstacles
-    
+    shaping_threshold = 1.5  # Start shaping within 1.5m of obstacles
     shaping_reward = 0.0
+    
     if min_person_dist < shaping_threshold and min_person_dist > 0:
-        # Closer to person = more negative (linear shaping)
-        shaping_reward += -0.1 * (1.0 - min_person_dist / shaping_threshold)
+        # Closer to person = more negative (exponential decay)
+        proximity_factor = 1.0 - (min_person_dist / shaping_threshold)
+        shaping_reward += -0.15 * proximity_factor
     
     if min_door_dist < shaping_threshold and min_door_dist > 0:
         # Closer to door = more negative
-        shaping_reward += -0.1 * (1.0 - min_door_dist / shaping_threshold)
+        proximity_factor = 1.0 - (min_door_dist / shaping_threshold)
+        shaping_reward += -0.2 * proximity_factor
     
-    #reward += shaping_reward
+    reward += shaping_reward
     
     # ==========================================================================
     # 4. COLLISION PENALTY - Large penalty for actual physical collisions
@@ -494,13 +518,15 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     new_collisions = current_collision_count - prev_collision_count
     
     if new_collisions > 0:
-        reward += -8.0 * new_collisions  # Large penalty per collision
+        reward += -15.0 * new_collisions  # Increased from -8.0
     
     # ==========================================================================
-    # 5. GOAL REACHED BONUS
+    # 5. GOAL REACHED BONUS - Large sparse reward for success
     # ==========================================================================
+    # Should be large enough to incentivize completion over safe wandering
+    # At 1000 steps with good progress (~160 reward), goal bonus should be significant
     if dist < 1.0:  # Goal reached
-        reward += 15.0  # Large positive reward for completing the task
+        reward += 150.0  # Increased from 15.0 - 10x larger to dominate
     
     # Build info dict
     info = {
@@ -516,6 +542,7 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
         'progress_reward': progress_reward,
         'overlap_reward': overlap_reward,
         'shaping_reward': shaping_reward,
+        'time_penalty': time_penalty,
     }
 
     return reward, dist, current_collision_count, info
@@ -634,6 +661,8 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     # Training loop (episodes of the headless simulation)
     episodes = int(config.get('episodes', 50))
     max_steps = int(config.get('max_steps', 2000))
+    timeout_steps = int(config.get('timeout_steps', 1800))  # Episode timeout (failure if exceeded)
+    timeout_penalty = float(config.get('timeout_penalty', -100.0))  # Penalty for timeout failure
 
     global_step = 0
     returns = []
@@ -667,7 +696,8 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
         episode_return = 0.0
         overlap_counts = {'none': 0, 'person': 0, 'door': 0, 'both': 0}
         action_history = []  # Track action values for analysis (offset or w_max depending on mode)
-        reward_components = {'progress': 0.0, 'overlap': 0.0, 'shaping': 0.0}  # Track reward breakdown
+        reward_components = {'progress': 0.0, 'overlap': 0.0, 'shaping': 0.0, 'time': 0.0, 'timeout': 0.0}  # Track reward breakdown
+        episode_timeout = False  # Track if episode ended due to timeout
         
         # Loss tracking for this episode
         episode_losses = {'total': [], 'policy': [], 'value': [], 'entropy': []}
@@ -732,6 +762,30 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             reward, prev_dist, prev_collision_count, info = compute_reward(
                 sim, prev_dist, action_value_for_reward, prev_collision_count
             )
+            
+            # ==========================================================================
+            # TIMEOUT TERMINATION - Failure if episode exceeds timeout_steps
+            # ==========================================================================
+            # Episodes lasting too long indicate failure to navigate efficiently.
+            # At 60 Hz, 1800 steps = 30 seconds real-time.
+            timeout_triggered = False
+            if t >= timeout_steps - 1 and not done_flag:
+                timeout_triggered = True
+                done_flag = True  # Force episode termination
+                # Add timeout penalty proportional to remaining distance
+                # Closer to goal = smaller penalty (partial credit)
+                remaining_dist = info['distance']
+                initial_dist = 9.0  # Approximate initial distance to goal
+                progress_ratio = max(0.0, 1.0 - remaining_dist / initial_dist)
+                # Full penalty if no progress, reduced if close to goal
+                actual_timeout_penalty = timeout_penalty * (1.0 - 0.5 * progress_ratio)
+                reward += actual_timeout_penalty
+                info['timeout'] = True
+                info['timeout_penalty'] = actual_timeout_penalty
+            else:
+                info['timeout'] = False
+                info['timeout_penalty'] = 0.0
+            
             episode_return += reward
 
             # Track overlap statistics
@@ -741,6 +795,12 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             reward_components['progress'] += info['progress_reward']
             reward_components['overlap'] += info['overlap_reward']
             reward_components['shaping'] += info['shaping_reward']
+            reward_components['time'] += info['time_penalty']
+            reward_components['timeout'] += info['timeout_penalty']
+            
+            # Track timeout
+            if info['timeout']:
+                episode_timeout = True
 
             # PPO bookkeeping
             agent.buffer.rewards.append(float(reward))
@@ -865,8 +925,18 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             'entropy': np.mean(episode_losses['entropy']) if episode_losses['entropy'] else 0.0,
         }
 
-        print(f"Episode {ep+1}/{episodes} [{agent_type.upper()}] | Return: {episode_return:.2f} | Steps: {total_steps}")
+        # Determine episode outcome
+        final_dist = info['distance']
+        if final_dist < 1.0:
+            outcome = "SUCCESS"
+        elif episode_timeout:
+            outcome = "TIMEOUT"
+        else:
+            outcome = "RUNNING"  # Shouldn't happen with timeout enabled
+        
+        print(f"Episode {ep+1}/{episodes} [{agent_type.upper()}] | Return: {episode_return:.2f} | Steps: {total_steps} | {outcome}")
         print(f"  Curriculum Stage: {curriculum['stage'].upper()} | Door Radius: {door_halo_radius:.2f}m | Door Pos: {door_position_x:.1f}m | Side: {sim.door_side}")
+        print(f"  Final Distance: {final_dist:.2f}m | Timeout Penalty: {reward_components['timeout']:.2f}")
         print(f"  Rewards - Progress: {reward_components['progress']:.2f} | Overlap: {reward_components['overlap']:.2f} | Shaping: {reward_components['shaping']:.2f}")
         print(f"  Overlaps - Free: {overlap_pct['none']:.1f}% | Person: {overlap_pct['person']:.1f}% | Door: {overlap_pct['door']:.1f}% | Both: {overlap_pct['both']:.1f}%")
         if control_mode == 'offset':
@@ -881,10 +951,16 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
                 'episode': ep + 1,
                 'return': episode_return,
                 'steps': total_steps,
+                # Episode outcome
+                'outcome': outcome,
+                'success': 1.0 if outcome == "SUCCESS" else 0.0,
+                'timeout': 1.0 if episode_timeout else 0.0,
+                'final_distance': final_dist,
                 # Reward breakdown
                 'reward_progress': reward_components['progress'],
                 'reward_overlap': reward_components['overlap'],
                 'reward_shaping': reward_components['shaping'],
+                'reward_timeout': reward_components['timeout'],
                 # Overlap statistics
                 'overlap_free_pct': overlap_pct['none'],
                 'overlap_person_pct': overlap_pct['person'],
@@ -968,6 +1044,10 @@ def parse_args() -> argparse.Namespace:
     # Common parameters
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--max-steps', type=int, default=3000)
+    parser.add_argument('--timeout-steps', type=int, default=1800, 
+                        help='Episode timeout in steps (1800 = 30s at 60Hz). Episodes exceeding this are failures.')
+    parser.add_argument('--timeout-penalty', type=float, default=-100.0,
+                        help='Penalty for timeout failure (scaled by remaining distance)')
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--lr-actor', type=float, default=None)
     parser.add_argument('--lr-critic', type=float, default=None)
@@ -1007,6 +1087,8 @@ def main():
         # Common parameters
         'episodes': args.episodes,
         'max_steps': args.max_steps,
+        'timeout_steps': args.timeout_steps,
+        'timeout_penalty': args.timeout_penalty,
         'learning_rate': args.lr,
         'lr_actor': args.lr_actor if args.lr_actor is not None else args.lr,
         'lr_critic': args.lr_critic if args.lr_critic is not None else args.lr,
