@@ -467,13 +467,13 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
         overlap_reward = 0.0
     elif overlap_type == 'person':
         # Penalty for violating person's proxemic zone (social cost)
-        overlap_reward = -0.8
+        overlap_reward = -1.2
     elif overlap_type == 'door':
         # Penalty for blocking door area (navigation cost)
         overlap_reward = -1.5
     elif overlap_type == 'both':
         # Combined penalty for both violations
-        overlap_reward = -2.5
+        overlap_reward = -3.0
     else:
         overlap_reward = 0.0
     
@@ -486,7 +486,7 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     # At 1800 steps: 1800 * 0.02 = 36 total, much smaller than progress (~160)
     # At 1000 steps: 1000 * 0.02 = 20 total
     # Difference: 16 points saved by being 800 steps faster
-    time_penalty = -0.02
+    time_penalty = -0.08
     reward += time_penalty
     
     # ==========================================================================
@@ -661,7 +661,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     # Training loop (episodes of the headless simulation)
     episodes = int(config.get('episodes', 50))
     max_steps = int(config.get('max_steps', 2000))
-    timeout_steps = int(config.get('timeout_steps', 1800))  # Episode timeout (failure if exceeded)
+    timeout_steps = int(config.get('timeout_steps', 1600))  # Episode timeout (failure if exceeded)
     timeout_penalty = float(config.get('timeout_penalty', -100.0))  # Penalty for timeout failure
 
     global_step = 0
