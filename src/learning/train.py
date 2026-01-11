@@ -64,7 +64,7 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
     elif progress < 1.1:
         return {
             'door_halo_radius_range': (1.5, 2.3),  # Expanded range
-            'door_position_x_range': (6.0, 11.0),  # More variation in position
+            'door_position_x_range': (6.0, 10.0),  # More variation in position
             'randomize_door_side': False,          # Still on right side
             'stage': 'medium'
         }
@@ -73,7 +73,7 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
     elif progress < 1.1:
         return {
             'door_halo_radius_range': (1.3, 2.5),  # Full range
-            'door_position_x_range': (6.0, 11.0),  # Wide variation
+            'door_position_x_range': (6.0, 10.0),  # Wide variation
             'randomize_door_side': False,           # Randomize left/right
             'stage': 'hard'
         }
@@ -81,8 +81,8 @@ def get_curriculum_params(episode: int, total_episodes: int) -> dict:
     # Stage 4: Expert (final 20% of training)
     else:
         return {
-            'door_halo_radius_range': (0.8, 2.5),  # Full range
-            'door_position_x_range': (5.0, 13.0),  # Full range (25%-65% of corridor)
+            'door_halo_radius_range': (1.2, 2.5),  # Full range
+            'door_position_x_range': (6.0, 10.0),  # Full range (25%-65% of corridor)
             'randomize_door_side': False,           # Fully randomized
             'stage': 'expert'
         }
@@ -450,7 +450,7 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     # At 60 Hz with ~0.5 m/s speed, typical progress per step is ~0.008m
     # Over 1000 steps traveling 8m toward goal: 8 * 20 = 160 reward
     progress = progress_prev_dist - dist  # Positive if moving toward goal
-    progress_reward = progress * 20.0  # Increased from 10.0 for better signal
+    progress_reward = progress * 1.0  # Increased from 10.0 for better signal
     reward += progress_reward
     
     # ==========================================================================
@@ -467,13 +467,13 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
         overlap_reward = 0.0
     elif overlap_type == 'person':
         # Penalty for violating person's proxemic zone (social cost)
-        overlap_reward = -1.2
+        overlap_reward = -1.5
     elif overlap_type == 'door':
         # Penalty for blocking door area (navigation cost)
-        overlap_reward = -1.5
+        overlap_reward = -5.0
     elif overlap_type == 'both':
         # Combined penalty for both violations
-        overlap_reward = -3.0
+        overlap_reward = -15.0
     else:
         overlap_reward = 0.0
     
@@ -486,30 +486,32 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     # At 1800 steps: 1800 * 0.02 = 36 total, much smaller than progress (~160)
     # At 1000 steps: 1000 * 0.02 = 20 total
     # Difference: 16 points saved by being 800 steps faster
-    time_penalty = -0.08
+    time_penalty = -0.01
     reward += time_penalty
     
     # ==========================================================================
     # 3. PROXIMITY SHAPING - Small continuous signal near obstacles
     # ==========================================================================
-    # Helps agent learn to keep distance BEFORE entering violation zones
-    # Kept small to not overwhelm progress signal
-    min_person_dist, min_door_dist = compute_min_obstacle_distance(sim)
-    
-    shaping_threshold = 1.5  # Start shaping within 1.5m of obstacles
-    shaping_reward = 0.0
-    
-    if min_person_dist < shaping_threshold and min_person_dist > 0:
-        # Closer to person = more negative (exponential decay)
-        proximity_factor = 1.0 - (min_person_dist / shaping_threshold)
-        shaping_reward += -0.15 * proximity_factor
-    
-    if min_door_dist < shaping_threshold and min_door_dist > 0:
-        # Closer to door = more negative
-        proximity_factor = 1.0 - (min_door_dist / shaping_threshold)
-        shaping_reward += -0.2 * proximity_factor
-    
-    reward += shaping_reward
+    door_proximity_penalty = 0.0
+    if hasattr(sim.robot, 'door_position') and hasattr(sim.robot, 'corridor_bounds'):
+        door_pos = np.array(sim.robot.door_position, dtype=float)
+        door_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
+        dist_to_door = float(np.linalg.norm(robot_pos - door_pos))
+
+        bounds = sim.robot.corridor_bounds
+        corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
+        door_side = "left" if door_pos[1] < corridor_mid_y else "right"
+        n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
+        v = robot_pos - door_pos
+        on_inward_side = np.dot(n_world, v) > 0
+        
+        if on_inward_side:
+            influence_radius = door_radius * 2.5
+            if dist_to_door < influence_radius:
+                normalized_dist = dist_to_door / influence_radius
+                proximity_factor = (1.0 - normalized_dist) ** 2
+                door_proximity_penalty = -4.0 * proximity_factor
+                reward += door_proximity_penalty
     
     # ==========================================================================
     # 4. COLLISION PENALTY - Large penalty for actual physical collisions
@@ -518,7 +520,7 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     new_collisions = current_collision_count - prev_collision_count
     
     if new_collisions > 0:
-        reward += -15.0 * new_collisions  # Increased from -8.0
+        reward += -10.0 * new_collisions  # Increased from -8.0
     
     # ==========================================================================
     # 5. GOAL REACHED BONUS - Large sparse reward for success
@@ -526,7 +528,7 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     # Should be large enough to incentivize completion over safe wandering
     # At 1000 steps with good progress (~160 reward), goal bonus should be significant
     if dist < 1.0:  # Goal reached
-        reward += 150.0  # Increased from 15.0 - 10x larger to dominate
+        reward += 50.0  # Increased from 15.0 - 10x larger to dominate
     
     # Build info dict
     info = {
@@ -536,12 +538,9 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
         'overlap_type': overlap_type,
         'person_overlap': overlap_info['person_overlap'],
         'door_overlap': overlap_info['door_overlap'],
-        'min_person_dist': min_person_dist if min_person_dist != float('inf') else -1.0,
-        'min_door_dist': min_door_dist if min_door_dist != float('inf') else -1.0,
         'action_value': action_value,
         'progress_reward': progress_reward,
         'overlap_reward': overlap_reward,
-        'shaping_reward': shaping_reward,
         'time_penalty': time_penalty,
     }
 
@@ -668,14 +667,20 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
     returns = []
     start_time = time.time()
 
+    use_curriculum = bool(config.get('use_curriculum', False))
+    
     for ep in range(episodes):
-        # Get curriculum parameters for this episode
-        curriculum = get_curriculum_params(ep, episodes)
-        
-        # Sample door parameters from curriculum ranges
-        door_halo_radius = random.uniform(*curriculum['door_halo_radius_range'])
-        door_position_x = random.uniform(*curriculum['door_position_x_range'])
-        door_side_param = None if curriculum['randomize_door_side'] else 'right'
+        # Get curriculum parameters or use fixed defaults
+        if use_curriculum:
+            curriculum = get_curriculum_params(ep, episodes)
+            door_halo_radius = random.uniform(*curriculum['door_halo_radius_range'])
+            door_position_x = random.uniform(*curriculum['door_position_x_range'])
+            door_side_param = None if curriculum['randomize_door_side'] else 'right'
+        else:
+            curriculum = {'stage': 'fixed'}
+            door_halo_radius = 1.8
+            door_position_x = 8.0
+            door_side_param = 'right'
         
         sim = Simulation(
             corridor_width=corridor_width,
@@ -794,7 +799,6 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             # Track reward component breakdown
             reward_components['progress'] += info['progress_reward']
             reward_components['overlap'] += info['overlap_reward']
-            reward_components['shaping'] += info['shaping_reward']
             reward_components['time'] += info['time_penalty']
             reward_components['timeout'] += info['timeout_penalty']
             
@@ -1066,6 +1070,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--batch-size', type=int, default=256, help='TD3: batch size for updates')
     # Common training parameters
     parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
+    parser.add_argument('--use-curriculum', action='store_true', help='Enable curriculum learning for door parameters')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use-wandb', action='store_true')
     parser.add_argument('--wandb-project', type=str, default='PredictiveDWA')
@@ -1095,6 +1100,7 @@ def main():
         'hidden_size': args.hidden,
         'gamma': args.gamma,
         'action_select_interval': args.action_select_interval,
+        'use_curriculum': args.use_curriculum,
         'seed': args.seed,
         'wandb_project': args.wandb_project,
         # PPO-specific parameters
