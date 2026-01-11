@@ -12,7 +12,7 @@ Usage:
   python monte_carlo.py --runs 10 --mode default
 
   # Run with learned model
-  python monte_carlo.py --runs 10 --mode learned --model checkpoints/td3_policy_WorkingOffset2.pt
+  python monte_carlo.py --runs 10 --mode learned --model checkpoints/td3_policy.pt
 
   # Run learned model with custom action interval
   python monte_carlo.py --runs 10 --mode learned --action-select-interval 5
@@ -95,7 +95,7 @@ class MonteCarloRunner:
         if self.model_path is None:
             # Default path
             self.model_path = os.path.join(
-                os.path.dirname(__file__), '..', 'learning', 'checkpoints', 'td3_policy_WorkingOffset2.pt'
+                os.path.dirname(__file__), '..', 'learning', 'checkpoints', 'td3_policy.pt'
             )
         
         print(f"Loading learned model from: {self.model_path}")
@@ -619,7 +619,7 @@ Examples:
     
     # Learned mode arguments
     parser.add_argument('--model', type=str, default=None,
-                        help='Path to trained model (for learned mode, default: checkpoints/td3_policy_WorkingOffset2.pt)')
+                        help='Path to trained model (for learned mode, default: checkpoints/td3_policy.pt)')
     parser.add_argument('--action-select-interval', type=int, default=1,
                         help='Select a new action every N steps in learned mode (default: 1)')
     

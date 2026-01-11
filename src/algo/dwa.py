@@ -161,9 +161,11 @@ class DWA:
         if self.agent_w_max is not None:
             # agent_w_max is in [0, 1], scale to actual w_max
             # 1.0 = full range (pi), 0.0 = no turning (but keep small minimum for stability)
-            min_w_max = 0.1  # Minimum w_max to prevent getting stuck
-            scaled_w_max = min_w_max + self.agent_w_max * (math.pi - min_w_max)
-            w_min, w_max = -scaled_w_max, scaled_w_max
+#            min_w_max = 0.1  # Minimum w_max to prevent getting stuck
+#            scaled_w_max = min_w_max + self.agent_w_max * (math.pi - min_w_max)
+#            w_min, w_max = -scaled_w_max, scaled_w_max
+            #w_min, w_max = self.get_door_aware_sampling_params()
+            w_min, w_max = -math.pi, math.pi
         else:
             # Default: use door-aware sampling or full range
             #w_min, w_max = self.get_door_aware_sampling_params()

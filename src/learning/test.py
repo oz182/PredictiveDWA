@@ -275,7 +275,7 @@ def main(render=True, model_path='checkpoints/td3_policy.pt', episodes=3, action
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--render', action='store_true', help='Enable rendering')
-    parser.add_argument('--model', type=str, default='checkpoints/theta_qnet.pt', help='Path to trained model')
+    parser.add_argument('--model', type=str, default='checkpoints/td3_policy.pt', help='Path to trained model')
     parser.add_argument('--episodes', type=int, default=3, help='Number of evaluation episodes')
     parser.add_argument('--action-select-interval', type=int, default=1, help='Select a new action every N steps (default 1 = every step)')
     parser.add_argument('--save-csv', action='store_true', help='Save episode data to CSV')
