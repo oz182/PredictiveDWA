@@ -53,10 +53,10 @@ class TSDWA:
         radius: float,
         corridor_bounds: dict,
         *,
-        look_ahead_idx: int = 6,        # i_look in the paper
-        n_heading: int = 9,             # n_asamp   (angular samples in polar space)
-        n_speed: int = 9,               # n_vsamp   (speed magnitude samples)
-        theta_range: float = math.pi/6,  # θ_range   (±30° cone)
+        look_ahead_idx: int = 200,        # i_look in the paper
+        n_heading: int = 12,             # n_asamp   (angular samples in polar space)
+        n_speed: int = 12,               # n_vsamp   (speed magnitude samples)
+        theta_range: float = math.pi/2,  # θ_range   (±30° cone)
         alpha_ph: float = 1.0,          # α_ph heading‑bias gain
         n_skip: int = 1,                # spacing between curvature calculation points
         sampling_strategy: str = "uniform",  # Strategy: "uniform", "power", "gaussian", "beta"
