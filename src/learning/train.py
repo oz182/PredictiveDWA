@@ -98,6 +98,9 @@ def extract_nav_features(sim) -> np.ndarray:
       - three closest people relative positions wrt robot: [(dx, dy) x 3] / 5.0
       - distances to corridor left and right boundaries / 2.0
       - door_inflation_radius / 3.0
+      - door side indicator (-1 left, +1 right)
+      - door window proximity factor (0..1, higher near door x)
+      - lateral offset to safe lane (normalized)
     """
     robot_pos = np.asarray(sim.robot.position, dtype=float)
     goal_pos = np.asarray(sim.robot.goal, dtype=float)
@@ -154,6 +157,27 @@ def extract_nav_features(sim) -> np.ndarray:
     door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
     door_inflation_radius_normalized = door_inflation_radius / DOOR_RADIUS_SCALE
 
+    # Door context features (side, window proximity, and safe-lane offset)
+    door_side_flag = 0.0
+    door_window_factor = 0.0
+    safe_lane_offset_norm = 0.0
+    if hasattr(sim.robot, 'corridor_bounds'):
+        bounds = sim.robot.corridor_bounds
+        corridor_width = float(bounds['y_max'] - bounds['y_min'])
+        corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
+        door_side = "left" if door_pos[1] < corridor_mid_y else "right"
+        door_side_flag = -1.0 if door_side == "left" else 1.0
+        lane_margin = max(0.4, min(0.8, 0.2 * corridor_width))
+        if door_side == "right":
+            target_y = bounds['y_min'] + lane_margin
+        else:
+            target_y = bounds['y_max'] - lane_margin
+        lateral_span = max(1e-3, corridor_width - 2.0 * lane_margin)
+        safe_lane_offset_norm = min(1.0, abs(float(robot_pos[1]) - float(target_y)) / lateral_span)
+        door_window = max(2.0, door_inflation_radius * 2.5)
+        x_dist = abs(float(robot_pos[0]) - float(door_pos[0]))
+        door_window_factor = max(0.0, 1.0 - (x_dist / door_window))
+
     feat: list[float] = []
     # Goal relative position (most important)
     feat.append(goal_dx)
@@ -168,6 +192,10 @@ def extract_nav_features(sim) -> np.ndarray:
     feat.append(dist_right)
     # Door inflation radius
     feat.append(door_inflation_radius_normalized)
+    # Door context
+    feat.append(door_side_flag)
+    feat.append(door_window_factor)
+    feat.append(safe_lane_offset_norm)
 
     return np.asarray(feat, dtype=np.float32)
 
@@ -329,7 +357,7 @@ def check_robot_overlap(sim) -> dict:
         door_pos = np.array(sim.robot.door_position, dtype=float)
         bounds = sim.robot.corridor_bounds
         
-        # Door halo radius
+        # Door halo radius (extended to wall to eliminate gap)
         door_inflation_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
         
         # Distance from robot to door
@@ -338,6 +366,11 @@ def check_robot_overlap(sim) -> dict:
         # Determine door side and inward normal
         corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
         door_side = "left" if door_pos[1] < corridor_mid_y else "right"
+        if door_side == "right":
+            gap_to_wall = max(0.0, float(bounds['y_max'] - door_pos[1]))
+        else:
+            gap_to_wall = max(0.0, float(door_pos[1] - bounds['y_min']))
+        door_inflation_radius += gap_to_wall
         n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
         
         # Vector from door to robot
@@ -407,6 +440,11 @@ def compute_min_obstacle_distance(sim) -> tuple[float, float]:
         # Check if robot is on the inward-facing side
         corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
         door_side = "left" if door_pos[1] < corridor_mid_y else "right"
+        if door_side == "right":
+            gap_to_wall = max(0.0, float(bounds['y_max'] - door_pos[1]))
+        else:
+            gap_to_wall = max(0.0, float(door_pos[1] - bounds['y_min']))
+        door_inflation_radius += gap_to_wall
         n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
         
         dot_product = np.dot(n_world, v)
@@ -490,9 +528,14 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
     reward += time_penalty
     
     # ==========================================================================
-    # 3. PROXIMITY SHAPING - Small continuous signal near obstacles
+    # 3. PROXIMITY + LANE SHAPING - Encourage door bypass path
     # ==========================================================================
     door_proximity_penalty = 0.0
+    door_lane_penalty = 0.0
+    stall_penalty = 0.0
+    door_lane_reward = 0.0
+    door_gap_penalty = 0.0
+    min_person_dist, _ = compute_min_obstacle_distance(sim)
     if hasattr(sim.robot, 'door_position') and hasattr(sim.robot, 'corridor_bounds'):
         door_pos = np.array(sim.robot.door_position, dtype=float)
         door_radius = float(getattr(sim.robot.global_planner, 'door_halo_radius', 1.0))
@@ -500,11 +543,18 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
 
         bounds = sim.robot.corridor_bounds
         corridor_mid_y = (bounds['y_min'] + bounds['y_max']) * 0.5
+        corridor_width = float(bounds['y_max'] - bounds['y_min'])
         door_side = "left" if door_pos[1] < corridor_mid_y else "right"
+        if door_side == "right":
+            gap_to_wall = max(0.0, float(bounds['y_max'] - door_pos[1]))
+        else:
+            gap_to_wall = max(0.0, float(door_pos[1] - bounds['y_min']))
+        door_radius += gap_to_wall
         n_world = np.array([0.0, 1.0]) if door_side == "left" else np.array([0.0, -1.0])
         v = robot_pos - door_pos
         on_inward_side = np.dot(n_world, v) > 0
-        
+
+        # --- Proximity shaping around the door halo (only on inward side)
         if on_inward_side:
             influence_radius = door_radius * 2.5
             if dist_to_door < influence_radius:
@@ -512,6 +562,47 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
                 proximity_factor = (1.0 - normalized_dist) ** 2
                 door_proximity_penalty = -4.0 * proximity_factor
                 reward += door_proximity_penalty
+
+        # --- Lateral lane shaping to bypass the door area
+        # Encourage the robot to move to the opposite side of the corridor
+        lane_margin = max(0.4, min(0.8, 0.2 * corridor_width))
+        if door_side == "right":
+            target_y = bounds['y_min'] + lane_margin
+        else:
+            target_y = bounds['y_max'] - lane_margin
+
+        door_window = max(2.0, door_radius * 2.5)
+        x_dist = abs(float(robot_pos[0]) - float(door_pos[0]))
+        door_window_factor = max(0.0, 1.0 - (x_dist / door_window))
+
+        if door_window_factor > 0.0:
+            lateral_span = max(1e-3, corridor_width - 2.0 * lane_margin)
+            lateral_dev = abs(float(robot_pos[1]) - float(target_y))
+            lateral_dev_norm = min(1.0, lateral_dev / lateral_span)
+            door_lane_penalty = -2.0 * (lateral_dev_norm ** 2) * door_window_factor
+            reward += door_lane_penalty
+
+            # Discourage stalling near the door when the path is clear
+            speed = float(np.linalg.norm(sim.robot.velocity))
+            if speed < 0.05 and min_person_dist > 0.6:
+                stall_penalty = -0.5 * door_window_factor
+                reward += stall_penalty
+
+            # Positive reinforcement for committing to the safe lane near the door
+            if lateral_dev_norm < 0.25 and speed > 0.1:
+                door_lane_reward = 0.6 * (1.0 - lateral_dev_norm) * door_window_factor
+                reward += door_lane_reward
+
+            # Penalize "gap hugging" near the door-side wall even if outside halo
+            if door_side == "right":
+                dist_to_door_wall = max(0.0, float(bounds['y_max'] - robot_pos[1]))
+            else:
+                dist_to_door_wall = max(0.0, float(robot_pos[1] - bounds['y_min']))
+            gap_band = max(0.4, min(1.0, door_radius * 0.8))
+            if dist_to_door_wall < gap_band:
+                gap_factor = (1.0 - dist_to_door_wall / gap_band) ** 2
+                door_gap_penalty = -1.5 * gap_factor * door_window_factor
+                reward += door_gap_penalty
     
     # ==========================================================================
     # 4. COLLISION PENALTY - Large penalty for actual physical collisions
@@ -531,6 +622,13 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
         reward += 50.0  # Increased from 15.0 - 10x larger to dominate
     
     # Build info dict
+    shaping_reward = (
+        door_proximity_penalty
+        + door_lane_penalty
+        + stall_penalty
+        + door_lane_reward
+        + door_gap_penalty
+    )
     info = {
         'distance': dist,
         'collisions': current_collision_count,
@@ -541,6 +639,12 @@ def compute_reward(sim, progress_prev_dist: float, action_value: float = 0.0,
         'action_value': action_value,
         'progress_reward': progress_reward,
         'overlap_reward': overlap_reward,
+        'shaping_reward': shaping_reward,
+        'door_proximity_penalty': door_proximity_penalty,
+        'door_lane_penalty': door_lane_penalty,
+        'stall_penalty': stall_penalty,
+        'door_lane_reward': door_lane_reward,
+        'door_gap_penalty': door_gap_penalty,
         'time_penalty': time_penalty,
     }
 
@@ -799,6 +903,7 @@ def train(config: Dict[str, Any], use_wandb: bool = True, run_name: Optional[str
             # Track reward component breakdown
             reward_components['progress'] += info['progress_reward']
             reward_components['overlap'] += info['overlap_reward']
+            reward_components['shaping'] += info['shaping_reward']
             reward_components['time'] += info['time_penalty']
             reward_components['timeout'] += info['timeout_penalty']
             
@@ -1052,7 +1157,7 @@ def parse_args() -> argparse.Namespace:
                         help='Episode timeout in steps (1800 = 30s at 60Hz). Episodes exceeding this are failures.')
     parser.add_argument('--timeout-penalty', type=float, default=-100.0,
                         help='Penalty for timeout failure (scaled by remaining distance)')
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--lr', type=float, default=3e-3)
     parser.add_argument('--lr-actor', type=float, default=None)
     parser.add_argument('--lr-critic', type=float, default=None)
     parser.add_argument('--hidden', type=int, default=128)
@@ -1063,8 +1168,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--update-timestep', type=int, default=2000, help='PPO: update policy every N timesteps')
     # TD3-specific parameters
     parser.add_argument('--tau', type=float, default=0.005, help='TD3: soft update coefficient')
-    parser.add_argument('--policy-noise', type=float, default=0.2, help='TD3: noise added to target policy')
-    parser.add_argument('--noise-clip', type=float, default=0.5, help='TD3: range to clip target policy noise')
+    parser.add_argument('--policy-noise', type=float, default=0.1, help='TD3: noise added to target policy')
+    parser.add_argument('--noise-clip', type=float, default=0.3, help='TD3: range to clip target policy noise')
     parser.add_argument('--policy-delay', type=int, default=2, help='TD3: frequency of delayed policy updates')
     parser.add_argument('--buffer-size', type=int, default=1_000_000, help='TD3: replay buffer size')
     parser.add_argument('--batch-size', type=int, default=256, help='TD3: batch size for updates')
