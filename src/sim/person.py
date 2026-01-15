@@ -41,7 +41,8 @@ class Person:
         self.travel_distance = 0
         self.max_distance = random.uniform(3.0, 7.0)  # Distance before disappearing
         self.turn_angle = 0
-        self.turn_dist = random.uniform(self.corridor_width * 0.2, self.corridor_width * 0.5)
+        # Start turning earlier after entering the corridor
+        self.turn_dist = random.uniform(self.corridor_width * 0.1, self.corridor_width * 0.3)
 
         # Proxemic footprint (semi-major/minor axes in meters)
         self.proxemic_axes = np.array([radius * 1.5, radius * 0.5], dtype=float)
