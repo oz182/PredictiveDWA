@@ -99,9 +99,9 @@ class Simulation:
         """Returns the precise (x,y) world coordinates of the door"""
         door_x = self.door_position
         if self.door_side == "right":
-            door_y = self.corridor_width - 0.5  # 0.5m from right wall
+            door_y = self.corridor_width  # right wall
         else:
-            door_y = 0.5  # 0.5m from left wall
+            door_y = 0.0  # left wall
         return (door_x, door_y)
     
     def spawn_person_with_target(self):
@@ -110,10 +110,10 @@ class Simulation:
             
         door_x = self.door_position
         if self.door_side == "right":
-            door_y = self.corridor_width - 0.5
+            door_y = self.corridor_width
             target = (door_x, -1.0)  # Move down out of corridor
         else:
-            door_y = 0.5
+            door_y = 0.0
             target = (door_x, self.corridor_width + 1.0)  # Move up out of corridor
             
         speed = self.people_speeds[len(self.people)]
@@ -125,9 +125,9 @@ class Simulation:
             
         door_x = self.door_position
         if self.door_side == "right":
-            door_y = self.corridor_width - 0.5
+            door_y = self.corridor_width
         else:
-            door_y = 0.5
+            door_y = 0.0
             
         speed = self.people_speeds[len(self.people)]
         person = Person((door_x, door_y), 0.3, speed, self.door_side, self.corridor_width, self.corridor_length)
